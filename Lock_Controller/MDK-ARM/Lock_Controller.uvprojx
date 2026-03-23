@@ -1517,6 +1517,16 @@
               <FileType>1</FileType>
               <FilePath>..\Libraries\button.c</FilePath>
             </File>
+            <File>
+              <FileName>fonts.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\fonts.c</FilePath>
+            </File>
+            <File>
+              <FileName>st7735.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\st7735.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

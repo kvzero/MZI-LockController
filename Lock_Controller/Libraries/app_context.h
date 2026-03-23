@@ -8,6 +8,7 @@
 #include "hv_dac.h"
 #include "hv_amp.h"
 #include "button.h"
+#include "st7735.h"
 
 /**
  * @brief  System Operational States.
@@ -28,6 +29,7 @@ typedef struct {
     Button_Handle_t *hbtn;
     HV_DAC_Handle_t *hvdac;
     HVAMP_Handle_t  *hvamp;
+    ST7735_Handle_t *hlcd;
 
 } App_Context_t;
 
