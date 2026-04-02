@@ -20,6 +20,7 @@
 #include "main.h"
 #include "adc.h"
 #include "dac.h"
+#include "dma.h"
 #include "spi.h"
 #include "tim.h"
 #include "usb.h"
@@ -84,11 +85,19 @@ ST7735_Handle_t hlcd = {
     .blk_channel = TIM_CHANNEL_1,
 };
 
+PDADC_Handle_t hpdadc = {
+    .hadc_master = &hadc1,
+    .hadc_slave  = &hadc2,
+    .htim_trig   = &htim1,
+    .busy        = 0U,
+};
+
 static App_Context_t app_inst = {
     .hbtn  = &hbtn,
     .hvdac = &hhvdac,
     .hvamp = &hhvamp,
     .hlcd  = &hlcd,
+    .hpdadc = &hpdadc,
 };
 App_Context_t * const g_app = &app_inst;
 
@@ -134,6 +143,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USB_PCD_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
@@ -144,6 +154,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM15_Init();
   /* USER CODE BEGIN 2 */
+  PDADC_Init(&hpdadc);
   ST7735_Init(g_app->hlcd);
   // DBG_DAC_Init();
   HVDAC_Init(g_app->hvdac); 
@@ -166,7 +177,6 @@ int main(void)
       //   current_page->OnEvent(&evt);
       // }
     }
-
     
     /* USER CODE END WHILE */
 
