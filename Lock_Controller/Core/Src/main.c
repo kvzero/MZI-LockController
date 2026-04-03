@@ -28,7 +28,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "app_context.h"
+#include "app.h"
+#include "app_hardware.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,14 +93,14 @@ PDADC_Handle_t hpdadc = {
     .busy        = 0U,
 };
 
-static App_Context_t app_inst = {
+static AppHardware_t hw_inst = {
     .hbtn  = &hbtn,
     .hvdac = &hhvdac,
     .hvamp = &hhvamp,
     .hlcd  = &hlcd,
     .hpdadc = &hpdadc,
 };
-App_Context_t * const g_app = &app_inst;
+AppHardware_t * const g_hw = &hw_inst;
 
 /* USER CODE END PV */
 
@@ -154,12 +155,13 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM15_Init();
   /* USER CODE BEGIN 2 */
-  PDADC_Init(&hpdadc);
-  ST7735_Init(g_app->hlcd);
+  PDADC_Init(g_hw->hpdadc);
+  ST7735_Init(g_hw->hlcd);
   // DBG_DAC_Init();
-  HVDAC_Init(g_app->hvdac); 
-  HVAMP_Init(g_app->hvamp); 
-  BTN_Init(g_app->hbtn);
+  HVDAC_Init(g_hw->hvdac); 
+  HVAMP_Init(g_hw->hvamp); 
+  BTN_Init(g_hw->hbtn);
+  APP_Init();
 
   /* USER CODE END 2 */
 
@@ -167,17 +169,19 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    if (HVAMP_ReadFault(g_app->hvamp)) {
-        HVAMP_Disable(g_app->hvamp);
-      }
+    if (HVAMP_ReadFault(g_hw->hvamp)) {
+        HVAMP_Disable(g_hw->hvamp);
+        APP_SetFault(APP_FAULT_HVAMP);
+    }
 
     Button_Event_t evt;
-    if (BTN_GetEvent(&evt)) {
-      // if (current_page != NULL && current_page->OnEvent != NULL) {
-      //   current_page->OnEvent(&evt);
-      // }
+    while (BTN_GetEvent(&evt)) {
+      APP_OnButton(evt);
     }
-    
+
+    APP_Process();
+    APP_RenderIfNeeded();
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

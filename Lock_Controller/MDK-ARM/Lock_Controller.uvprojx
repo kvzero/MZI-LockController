@@ -1556,6 +1556,36 @@
           </Files>
         </Group>
         <Group>
+          <GroupName>Libraries/App</GroupName>
+          <Files>
+            <File>
+              <FileName>app_page_acquire.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_page_acquire.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_page_fault.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_page_fault.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_page_wait.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_page_wait.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_widgets.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_widgets.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
           <GroupName>Libraries/Hardware</GroupName>
           <Files>
             <File>
