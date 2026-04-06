@@ -346,9 +346,11 @@ static void PDADC_StopActiveStream(bool notify_error)
     hdma = h->hadc_master->DMA_Handle;
 
     if (h->htim_trig != NULL) {
-        __HAL_TIM_DISABLE(h->htim_trig);
+        (void)HAL_TIM_Base_Stop(h->htim_trig);
         __HAL_TIM_SET_COUNTER(h->htim_trig, 0U);
     }
+
+    (void)HAL_ADCEx_MultiModeStop_DMA(h->hadc_master);
 
     __HAL_ADC_DISABLE_IT(h->hadc_master, ADC_IT_OVR);
     __HAL_ADC_CLEAR_FLAG(h->hadc_master, ADC_FLAG_OVR | ADC_FLAG_EOC | ADC_FLAG_EOS);
