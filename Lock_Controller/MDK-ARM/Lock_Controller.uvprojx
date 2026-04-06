@@ -1583,6 +1583,16 @@
               <FileType>1</FileType>
               <FilePath>..\Libraries\App\app_widgets.c</FilePath>
             </File>
+            <File>
+              <FileName>app_rtloop.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_rtloop.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_scan.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_scan.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

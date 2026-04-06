@@ -28,15 +28,32 @@ typedef enum {
 typedef enum {
     ACQ_STEP_IDLE = 0,
     ACQ_STEP_OFFSET_PREP,
-    ACQ_STEP_OFFSET_SAMPLE,
-    ACQ_STEP_OFFSET_DONE,
+    ACQ_STEP_OFFSET_RUN,
+    ACQ_STEP_SCAN_PREP,
+    ACQ_STEP_SCAN_RUN,
+    ACQ_STEP_RESULT_READY,
 } AcquireStep_t;
 
 typedef struct {
-    AcquireStep_t step;
-    uint16_t      pd_a_offset;
-    uint16_t      pd_b_offset;
-    bool          offset_valid;
+    uint16_t iout_offset_raw;
+    uint16_t iref_offset_raw;
+    bool     valid;
+} AppOffsetResult_t;
+
+typedef struct {
+    uint8_t  cycles_done;
+    uint8_t  cycles_total;
+    uint16_t contrast_q15;
+    uint16_t r_max_q15;
+    uint16_t r_min_q15;
+    uint16_t r_target_q15;
+    bool     valid;
+} AppScanResult_t;
+
+typedef struct {
+    AcquireStep_t     step;
+    AppOffsetResult_t offset;
+    AppScanResult_t   scan;
 } AppAcquireRuntime_t;
 
 /**
