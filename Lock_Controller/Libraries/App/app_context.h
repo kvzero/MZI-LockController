@@ -18,6 +18,7 @@ typedef enum {
     APP_FAULT_NONE = 0,
     APP_FAULT_HVAMP,
     APP_FAULT_ADC,
+    APP_FAULT_LOCK,
 } FaultCode_t;
 
 /**
@@ -31,6 +32,8 @@ typedef enum {
     ACQ_STEP_OFFSET_RUN,
     ACQ_STEP_SCAN_PREP,
     ACQ_STEP_SCAN_RUN,
+    ACQ_STEP_SOFTLOCK_PREP,
+    ACQ_STEP_SOFTLOCK_RUN,
     ACQ_STEP_RESULT_READY,
 } AcquireStep_t;
 
@@ -44,9 +47,9 @@ typedef struct {
     uint8_t  cycles_done;
     uint8_t  cycles_total;
     uint16_t contrast_q15;
-    uint16_t r_max_q15;
-    uint16_t r_min_q15;
-    uint16_t r_target_q15;
+    uint32_t r_max_q15;
+    uint32_t r_min_q15;
+    uint32_t r_target_q15;
     bool     valid;
 } AppScanResult_t;
 
@@ -56,6 +59,18 @@ typedef struct {
     AppScanResult_t   scan;
 } AppAcquireRuntime_t;
 
+typedef struct {
+    bool     active;
+    bool     soft_locked;
+    bool     error;
+    int8_t   polarity;
+    uint32_t r_target_q15;
+    uint32_t r_now_q15;
+    int32_t  error_q15;
+    uint16_t capture_raw;
+    uint16_t output_raw;
+} AppLockRuntime_t;
+
 /**
  * @brief Front-end runtime shared by all app pages.
  */
@@ -64,6 +79,7 @@ typedef struct {
     FaultCode_t        fault;
     bool               ui_dirty;
     AppAcquireRuntime_t acquire;
+    AppLockRuntime_t    lock;
 } AppRuntime_t;
 
 extern AppRuntime_t g_rt;

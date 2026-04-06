@@ -1,6 +1,7 @@
 #include "app_rtloop.h"
 
 #include "app_hardware.h"
+#include "app_lock.h"
 #include "app_scan.h"
 
 typedef struct {
@@ -154,6 +155,9 @@ static void APPRTLOOP_OnDone(const uint32_t *cdr_buf,
                 break;
 
             case APP_RTLOOP_MODE_LOCK:
+                APPLOCK_OnSample(&sample);
+                break;
+
             case APP_RTLOOP_MODE_IDLE:
             default:
                 break;

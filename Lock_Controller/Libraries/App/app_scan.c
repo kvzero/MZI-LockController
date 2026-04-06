@@ -16,12 +16,12 @@ typedef struct {
     uint16_t dac_max_raw;
     int8_t   direction;
 
-    uint16_t median_buf[APPSCAN_MEDIAN_WINDOW];
+    uint32_t median_buf[APPSCAN_MEDIAN_WINDOW];
     uint8_t  median_count;
     uint8_t  median_index;
 
-    uint16_t r_max_q15;
-    uint16_t r_min_q15;
+    uint32_t r_max_q15;
+    uint32_t r_min_q15;
 
     AppScanResult_t result;
 } AppScanState_t;
@@ -29,9 +29,9 @@ typedef struct {
 static AppScanState_t s_scan;
 
 static void APPSCAN_ClearState(void);
-static uint16_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample);
-static bool APPSCAN_PushMedian(uint16_t value, uint16_t *median_out);
-static uint16_t APPSCAN_Median9(const uint16_t *values);
+static uint32_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample);
+static bool APPSCAN_PushMedian(uint32_t value, uint32_t *median_out);
+static uint32_t APPSCAN_Median9(const uint32_t *values);
 static void APPSCAN_AdvanceWaveform(void);
 static void APPSCAN_Finish(void);
 
@@ -59,7 +59,7 @@ bool APPSCAN_Start(uint8_t cycles_total,
     s_scan.cycles_total = cycles_total;
     s_scan.dac_max_raw = g_hw->hvdac->max_raw;
     s_scan.direction = 1;
-    s_scan.r_min_q15 = 0xFFFFU;
+    s_scan.r_min_q15 = 0xFFFFFFFFUL;
     s_scan.result.cycles_total = cycles_total;
 
     APPRTLOOP_WriteRaw(0U);
@@ -98,8 +98,8 @@ const AppScanResult_t *APPSCAN_GetResult(void)
 
 void APPSCAN_OnSample(const AppRtloopSample_t *sample)
 {
-    uint16_t r_q15;
-    uint16_t r_med_q15;
+    uint32_t r_q15;
+    uint32_t r_med_q15;
 
     if (!s_scan.active || (sample == NULL)) {
         return;
@@ -138,7 +138,7 @@ static void APPSCAN_ClearState(void)
     s_scan.r_min_q15 = 0U;
 
     for (i = 0U; i < APPSCAN_MEDIAN_WINDOW; ++i) {
-        s_scan.median_buf[i] = 0U;
+        s_scan.median_buf[i] = 0UL;
     }
 
     s_scan.result.cycles_done = 0U;
@@ -150,7 +150,7 @@ static void APPSCAN_ClearState(void)
     s_scan.result.valid = false;
 }
 
-static uint16_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample)
+static uint32_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample)
 {
     uint32_t iout_u;
     uint32_t iref_u;
@@ -164,10 +164,10 @@ static uint16_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample)
     iout_u = (uint32_t)sample->iout;
     iref_u = (uint32_t)sample->iref;
 
-    return (uint16_t)((iout_u << 15) / iref_u);
+    return (uint32_t)((iout_u << 15) / iref_u);
 }
 
-static bool APPSCAN_PushMedian(uint16_t value, uint16_t *median_out)
+static bool APPSCAN_PushMedian(uint32_t value, uint32_t *median_out)
 {
     s_scan.median_buf[s_scan.median_index] = value;
     s_scan.median_index = (uint8_t)((s_scan.median_index + 1U) % APPSCAN_MEDIAN_WINDOW);
@@ -184,10 +184,10 @@ static bool APPSCAN_PushMedian(uint16_t value, uint16_t *median_out)
     return true;
 }
 
-static uint16_t APPSCAN_Median9(const uint16_t *values)
+static uint32_t APPSCAN_Median9(const uint32_t *values)
 {
-    uint16_t sorted[APPSCAN_MEDIAN_WINDOW];
-    uint16_t key;
+    uint32_t sorted[APPSCAN_MEDIAN_WINDOW];
+    uint32_t key;
     uint8_t i;
     uint8_t j;
 
@@ -273,10 +273,10 @@ static void APPSCAN_Finish(void)
 
     s_scan.result.cycles_done = s_scan.cycles_done;
     s_scan.result.cycles_total = s_scan.cycles_total;
-    s_scan.result.contrast_q15 = (uint16_t)((contrast_num << 15) / contrast_den);
+    s_scan.result.contrast_q15 = (uint16_t)(((uint64_t)contrast_num << 15) / contrast_den);
     s_scan.result.r_max_q15 = s_scan.r_max_q15;
     s_scan.result.r_min_q15 = s_scan.r_min_q15;
-    s_scan.result.r_target_q15 = (uint16_t)(r_sum / 2U);
+    s_scan.result.r_target_q15 = (uint32_t)(r_sum / 2U);
     s_scan.result.valid = true;
 
     s_scan.done = true;

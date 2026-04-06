@@ -2,6 +2,7 @@
 #include "app.h"
 #include "app_core.h"
 #include "app_hardware.h"
+#include "app_lock.h"
 #include "app_rtloop.h"
 #include "app_scan.h"
 #include "app_widgets.h"
@@ -25,6 +26,7 @@ const AppPageOps_t APP_PAGE_ACQUIRE_OPS = {
 
 static void APPACQ_Enter(void)
 {
+    APPLOCK_Reset();
     APPSCAN_Reset();
     g_rt.acquire.step = ACQ_STEP_OFFSET_PREP;
     g_rt.acquire.offset.iout_offset_raw = 0U;
@@ -37,11 +39,22 @@ static void APPACQ_Enter(void)
     g_rt.acquire.scan.r_min_q15 = 0U;
     g_rt.acquire.scan.r_target_q15 = 0U;
     g_rt.acquire.scan.valid = false;
+    g_rt.lock.active = false;
+    g_rt.lock.soft_locked = false;
+    g_rt.lock.error = false;
+    g_rt.lock.polarity = 0;
+    g_rt.lock.r_target_q15 = 0U;
+    g_rt.lock.r_now_q15 = 0U;
+    g_rt.lock.error_q15 = 0;
+    g_rt.lock.capture_raw = 0U;
+    g_rt.lock.output_raw = 0U;
 }
 
 static void APPACQ_Process(void)
 {
+    const AppLockRuntime_t *lock_result;
     const AppScanResult_t *scan_result;
+    bool was_soft_locked;
     uint16_t iout;
     uint16_t iref;
 
@@ -67,6 +80,7 @@ static void APPACQ_Process(void)
         case ACQ_STEP_SCAN_PREP:
             g_rt.acquire.scan.cycles_done = 0U;
             g_rt.acquire.scan.cycles_total = APPACQ_SCAN_CYCLES;
+            g_rt.acquire.scan.contrast_q15 = 0U;
             g_rt.acquire.scan.r_max_q15 = 0U;
             g_rt.acquire.scan.r_min_q15 = 0U;
             g_rt.acquire.scan.r_target_q15 = 0U;
@@ -99,6 +113,48 @@ static void APPACQ_Process(void)
             APP_RequestRender();
             break;
 
+        case ACQ_STEP_SOFTLOCK_PREP:
+            g_rt.lock.active = false;
+            g_rt.lock.soft_locked = false;
+            g_rt.lock.error = false;
+            g_rt.lock.polarity = 0;
+            g_rt.lock.r_target_q15 = g_rt.acquire.scan.r_target_q15;
+            g_rt.lock.r_now_q15 = 0U;
+            g_rt.lock.error_q15 = 0;
+            g_rt.lock.capture_raw = 0U;
+            g_rt.lock.output_raw = APPRTLOOP_GetLastRaw();
+
+            if (!APPLOCK_StartSoft(g_rt.acquire.offset.iout_offset_raw,
+                                   g_rt.acquire.offset.iref_offset_raw,
+                                   g_rt.acquire.scan.r_target_q15)) {
+                APP_SetFault(APP_FAULT_LOCK);
+                return;
+            }
+
+            g_rt.acquire.step = ACQ_STEP_SOFTLOCK_RUN;
+            APP_RequestRender();
+            break;
+
+        case ACQ_STEP_SOFTLOCK_RUN:
+            if (APPRTLOOP_HasError() || APPLOCK_HasError()) {
+                APPLOCK_Stop();
+                APP_SetFault(APP_FAULT_LOCK);
+                return;
+            }
+
+            lock_result = APPLOCK_GetResult();
+            if (lock_result == NULL) {
+                break;
+            }
+
+            was_soft_locked = g_rt.lock.soft_locked;
+            g_rt.lock = *lock_result;
+
+            if (g_rt.lock.soft_locked && !was_soft_locked) {
+                APP_RequestRender();
+            }
+            break;
+
         case ACQ_STEP_RESULT_READY:
         case ACQ_STEP_IDLE:
         default:
@@ -129,24 +185,22 @@ static void APPACQ_Render(void)
             APPW_DrawFrame("Scan Result");
             contrast_permille = ((uint32_t)g_rt.acquire.scan.contrast_q15 * 1000U + 16384U) >> 15;
 
-            (void)snprintf(line, sizeof(line), "Ctr: %3u.%1u%%",
+            (void)snprintf(line, sizeof(line), "Ctr:%3u.%1u%% %u/%u",
                            (unsigned)(contrast_permille / 10U),
-                           (unsigned)(contrast_permille % 10U));
-            APPW_WriteBodyLine(18, line);
-
-            (void)snprintf(line, sizeof(line), "Cycles: %u/%u",
+                           (unsigned)(contrast_permille % 10U),
                            (unsigned)g_rt.acquire.scan.cycles_done,
                            (unsigned)g_rt.acquire.scan.cycles_total);
+            APPW_WriteBodyLine(18, line);
+
+            (void)snprintf(line, sizeof(line), "Rmax: %lu", (unsigned long)g_rt.acquire.scan.r_max_q15);
             APPW_WriteBodyLine(32, line);
 
-            (void)snprintf(line, sizeof(line), "Rmax: %5u", (unsigned)g_rt.acquire.scan.r_max_q15);
+            (void)snprintf(line, sizeof(line), "Rmin: %lu", (unsigned long)g_rt.acquire.scan.r_min_q15);
             APPW_WriteBodyLine(46, line);
 
-            (void)snprintf(line, sizeof(line), "Rmin: %5u", (unsigned)g_rt.acquire.scan.r_min_q15);
+            (void)snprintf(line, sizeof(line), "Rtgt: %lu", (unsigned long)g_rt.acquire.scan.r_target_q15);
             APPW_WriteBodyLine(60, line);
-
-            (void)snprintf(line, sizeof(line), "Rtgt: %5u", (unsigned)g_rt.acquire.scan.r_target_q15);
-            APPW_WriteBodyLine(74, line);
+            APPW_WriteBodyLine(74, "Short press lock");
             break;
 
         case ACQ_STEP_OFFSET_PREP:
@@ -169,6 +223,14 @@ static void APPACQ_Render(void)
             APPW_WriteBodyLine(42, "Laser on, scanning");
             APPW_WriteBodyLine(56, "Please wait...");
             break;
+
+        case ACQ_STEP_SOFTLOCK_PREP:
+        case ACQ_STEP_SOFTLOCK_RUN:
+            APPW_DrawFrame("Soft Lock");
+            APPW_WriteBodyLine(24, g_rt.lock.soft_locked ? "Soft locked" : "Finding crossing");
+            APPW_WriteBodyLine(42, "Low bandwidth PI");
+            APPW_WriteBodyLine(56, "Holding fringe...");
+            break;
     }
 }
 
@@ -185,7 +247,11 @@ static void APPACQ_OnButton(Button_Event_t evt)
     if (!g_rt.acquire.scan.valid) {
         g_rt.acquire.step = ACQ_STEP_SCAN_PREP;
         APP_RequestRender();
+        return;
     }
+
+    g_rt.acquire.step = ACQ_STEP_SOFTLOCK_PREP;
+    APP_RequestRender();
 }
 
 static bool APPACQ_ReadOffsetAverage(uint16_t *iout, uint16_t *iref)

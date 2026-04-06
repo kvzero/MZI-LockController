@@ -1593,6 +1593,11 @@
               <FileType>1</FileType>
               <FilePath>..\Libraries\App\app_scan.c</FilePath>
             </File>
+            <File>
+              <FileName>app_lock.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_lock.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
