@@ -30,11 +30,15 @@ typedef enum {
     ACQ_STEP_IDLE = 0,
     ACQ_STEP_OFFSET_PREP,
     ACQ_STEP_OFFSET_RUN,
+    ACQ_STEP_OFFSET_DONE,
     ACQ_STEP_SCAN_PREP,
     ACQ_STEP_SCAN_RUN,
+    ACQ_STEP_SCAN_DONE,
     ACQ_STEP_SOFTLOCK_PREP,
     ACQ_STEP_SOFTLOCK_RUN,
-    ACQ_STEP_RESULT_READY,
+    ACQ_STEP_RESONANCE_PREP,
+    ACQ_STEP_RESONANCE_RUN,
+    ACQ_STEP_RESONANCE_DONE,
 } AcquireStep_t;
 
 typedef struct {
@@ -62,6 +66,7 @@ typedef struct {
 typedef struct {
     bool     active;
     bool     soft_locked;
+    bool     resonance_done;
     bool     error;
     int8_t   polarity;
     uint32_t r_target_q15;
@@ -69,6 +74,8 @@ typedef struct {
     int32_t  error_q15;
     uint16_t capture_raw;
     uint16_t output_raw;
+    uint32_t resonance_freq_hz;
+    uint32_t fn_hz;
 } AppLockRuntime_t;
 
 /**

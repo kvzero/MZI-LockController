@@ -9,8 +9,10 @@
  *   3. Use a short majority vote on the local slope to choose PI polarity.
  *   4. Enter a conservative low-bandwidth PI hold.
  *
- * Resonance identification and hard-lock mode will reuse this backend later,
- * but they are intentionally not implemented in this first soft-lock step.
+ * Resonance identification reuses the same soft PI hold below: a small DDS
+ * sine is added on top of PI output, while IQ accumulation estimates the
+ * response at each injected frequency. Hard-lock/notch mode is still left for
+ * a later step.
  */
 #define APPLOCK_MEDIAN_WINDOW       7U
 #define APPLOCK_SLOPE_VOTE_WINDOW  32U
@@ -23,14 +25,75 @@
  * must be tuned on the real interferometer.
  */
 #define APPLOCK_SOFT_KP_Q8_SHIFT    2U
-#define APPLOCK_SOFT_KI_Q8_SHIFT    7U
+#define APPLOCK_SOFT_KI_Q8_SHIFT    6U
+
+#define APPLOCK_SAMPLE_RATE_HZ                 200000UL
+#define APPLOCK_RESONANCE_INJ_AMP_RAW             64U
+#define APPLOCK_RESONANCE_COARSE_START_HZ       5000UL
+#define APPLOCK_RESONANCE_COARSE_END_HZ        40000UL
+#define APPLOCK_RESONANCE_COARSE_STEP_HZ         500UL
+#define APPLOCK_RESONANCE_COARSE_SAMPLES        1024U
+#define APPLOCK_RESONANCE_FINE_SPAN_HZ          1000UL
+#define APPLOCK_RESONANCE_FINE_STEP_HZ           100UL
+#define APPLOCK_RESONANCE_FINE_SAMPLES          2048U
+#define APPLOCK_SINE_TABLE_SIZE                  256U
+#define APPLOCK_SINE_TABLE_MASK                 0xFFU
+#define APPLOCK_COS_TABLE_OFFSET                  64U
+#define APPLOCK_IQ_AMP_SHIFT                      16U
 
 typedef enum {
     APPLOCK_STATE_IDLE = 0,
     APPLOCK_STATE_RAMP_TO_CENTER,
     APPLOCK_STATE_SWEEP_DOWN,
     APPLOCK_STATE_SOFT,
+    APPLOCK_STATE_RESONANCE,
 } AppLockState_t;
+
+typedef enum {
+    APPLOCK_RESONANCE_STAGE_IDLE = 0,
+    APPLOCK_RESONANCE_STAGE_COARSE,
+    APPLOCK_RESONANCE_STAGE_FINE,
+} AppLockResonanceStage_t;
+
+/*
+ * 256-point Q15 sine table for the resonance DDS. Cosine is the same table
+ * shifted by one quarter cycle. Keeping this static table here avoids runtime
+ * sin/cos cost in the realtime path.
+ */
+static const int16_t s_lock_sine_q15[APPLOCK_SINE_TABLE_SIZE] = {
+         0,    804,   1608,   2410,   3212,   4011,   4808,   5602,
+      6393,   7179,   7962,   8739,   9512,  10278,  11039,  11793,
+     12539,  13279,  14010,  14732,  15446,  16151,  16846,  17530,
+     18204,  18868,  19519,  20159,  20787,  21403,  22005,  22594,
+     23170,  23731,  24279,  24811,  25329,  25832,  26319,  26790,
+     27245,  27683,  28105,  28510,  28898,  29268,  29621,  29956,
+     30273,  30571,  30852,  31113,  31356,  31580,  31785,  31971,
+     32137,  32285,  32412,  32521,  32609,  32678,  32728,  32757,
+     32767,  32757,  32728,  32678,  32609,  32521,  32412,  32285,
+     32137,  31971,  31785,  31580,  31356,  31113,  30852,  30571,
+     30273,  29956,  29621,  29268,  28898,  28510,  28105,  27683,
+     27245,  26790,  26319,  25832,  25329,  24811,  24279,  23731,
+     23170,  22594,  22005,  21403,  20787,  20159,  19519,  18868,
+     18204,  17530,  16846,  16151,  15446,  14732,  14010,  13279,
+     12539,  11793,  11039,  10278,   9512,   8739,   7962,   7179,
+      6393,   5602,   4808,   4011,   3212,   2410,   1608,    804,
+         0,   -804,  -1608,  -2410,  -3212,  -4011,  -4808,  -5602,
+     -6393,  -7179,  -7962,  -8739,  -9512, -10278, -11039, -11793,
+    -12539, -13279, -14010, -14732, -15446, -16151, -16846, -17530,
+    -18204, -18868, -19519, -20159, -20787, -21403, -22005, -22594,
+    -23170, -23731, -24279, -24811, -25329, -25832, -26319, -26790,
+    -27245, -27683, -28105, -28510, -28898, -29268, -29621, -29956,
+    -30273, -30571, -30852, -31113, -31356, -31580, -31785, -31971,
+    -32137, -32285, -32412, -32521, -32609, -32678, -32728, -32757,
+    -32767, -32757, -32728, -32678, -32609, -32521, -32412, -32285,
+    -32137, -31971, -31785, -31580, -31356, -31113, -30852, -30571,
+    -30273, -29956, -29621, -29268, -28898, -28510, -28105, -27683,
+    -27245, -26790, -26319, -25832, -25329, -24811, -24279, -23731,
+    -23170, -22594, -22005, -21403, -20787, -20159, -19519, -18868,
+    -18204, -17530, -16846, -16151, -15446, -14732, -14010, -13279,
+    -12539, -11793, -11039, -10278,  -9512,  -8739,  -7962,  -7179,
+     -6393,  -5602,  -4808,  -4011,  -3212,  -2410,  -1608,   -804
+};
 
 /*
  * Private lock engine state. These fields are updated from the realtime sample
@@ -68,6 +131,19 @@ typedef struct {
     int8_t  polarity;
     int32_t integrator_q8;
 
+    AppLockResonanceStage_t resonance_stage;
+    uint32_t resonance_freq_hz;
+    uint32_t resonance_step_hz;
+    uint32_t resonance_end_hz;
+    uint16_t resonance_samples_target;
+    uint16_t resonance_samples_done;
+    uint32_t resonance_phase;
+    uint32_t resonance_phase_step;
+    int64_t  resonance_i_acc;
+    int64_t  resonance_q_acc;
+    uint64_t resonance_best_amp2;
+    uint32_t resonance_best_hz;
+
     AppLockRuntime_t result;
 } AppLockStateStore_t;
 
@@ -86,6 +162,15 @@ static void APPLOCK_ProcessRampToCenter(void);
 static void APPLOCK_ProcessSweepDown(uint32_t r_q15);
 static void APPLOCK_EnterSoft(uint32_t r_q15, int32_t error_q15);
 static void APPLOCK_ProcessSoft(uint32_t r_q15);
+static int32_t APPLOCK_RunPiQ8(uint32_t r_q15, int32_t *error_out);
+static void APPLOCK_StartResonancePoint(uint32_t freq_hz,
+                                        uint32_t step_hz,
+                                        uint32_t end_hz,
+                                        uint16_t samples_target,
+                                        AppLockResonanceStage_t stage);
+static void APPLOCK_ProcessResonance(uint32_t r_q15);
+static void APPLOCK_FinishResonancePoint(void);
+static uint64_t APPLOCK_ComputeIqAmp2(void);
 static void APPLOCK_Fail(void);
 static int32_t APPLOCK_ClampQ8(int32_t value_q8);
 static uint16_t APPLOCK_Q8ToRaw(int32_t value_q8);
@@ -126,6 +211,9 @@ bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
     s_lock.result.active = true;
     s_lock.result.r_target_q15 = r_target_q15;
     s_lock.result.output_raw = s_lock.output_raw;
+    s_lock.result.resonance_done = false;
+    s_lock.result.resonance_freq_hz = 0UL;
+    s_lock.result.fn_hz = 0UL;
 
     if (!APPRTLOOP_StartLock(iout_offset_raw, iref_offset_raw)) {
         APPLOCK_ClearState();
@@ -144,6 +232,27 @@ void APPLOCK_Stop(void)
     s_lock.active = false;
     s_lock.state = APPLOCK_STATE_IDLE;
     s_lock.result.active = false;
+}
+
+bool APPLOCK_StartResonanceSweep(void)
+{
+    if (!s_lock.active ||
+        (s_lock.state != APPLOCK_STATE_SOFT) ||
+        !s_lock.result.soft_locked) {
+        return false;
+    }
+
+    s_lock.resonance_best_amp2 = 0ULL;
+    s_lock.resonance_best_hz = 0UL;
+    APPLOCK_StartResonancePoint(APPLOCK_RESONANCE_COARSE_START_HZ,
+                                APPLOCK_RESONANCE_COARSE_STEP_HZ,
+                                APPLOCK_RESONANCE_COARSE_END_HZ,
+                                APPLOCK_RESONANCE_COARSE_SAMPLES,
+                                APPLOCK_RESONANCE_STAGE_COARSE);
+    s_lock.state = APPLOCK_STATE_RESONANCE;
+    s_lock.result.resonance_done = false;
+    s_lock.result.fn_hz = 0UL;
+    return true;
 }
 
 bool APPLOCK_HasError(void)
@@ -181,6 +290,11 @@ void APPLOCK_OnSample(const AppRtloopSample_t *sample)
             APPLOCK_ProcessSoft(r_q15);
             break;
 
+        case APPLOCK_STATE_RESONANCE:
+            r_q15 = APPLOCK_ComputeRatioQ15(sample);
+            APPLOCK_ProcessResonance(r_q15);
+            break;
+
         case APPLOCK_STATE_IDLE:
         default:
             break;
@@ -213,6 +327,18 @@ static void APPLOCK_ClearState(void)
     s_lock.crossing_error_q15 = 0;
     s_lock.polarity = 0;
     s_lock.integrator_q8 = 0;
+    s_lock.resonance_stage = APPLOCK_RESONANCE_STAGE_IDLE;
+    s_lock.resonance_freq_hz = 0UL;
+    s_lock.resonance_step_hz = 0UL;
+    s_lock.resonance_end_hz = 0UL;
+    s_lock.resonance_samples_target = 0U;
+    s_lock.resonance_samples_done = 0U;
+    s_lock.resonance_phase = 0UL;
+    s_lock.resonance_phase_step = 0UL;
+    s_lock.resonance_i_acc = 0;
+    s_lock.resonance_q_acc = 0;
+    s_lock.resonance_best_amp2 = 0ULL;
+    s_lock.resonance_best_hz = 0UL;
 
     for (i = 0U; i < APPLOCK_MEDIAN_WINDOW; ++i) {
         s_lock.median_buf[i] = 0UL;
@@ -224,6 +350,7 @@ static void APPLOCK_ClearState(void)
 
     s_lock.result.active = false;
     s_lock.result.soft_locked = false;
+    s_lock.result.resonance_done = false;
     s_lock.result.error = false;
     s_lock.result.polarity = 0;
     s_lock.result.r_target_q15 = 0U;
@@ -231,6 +358,8 @@ static void APPLOCK_ClearState(void)
     s_lock.result.error_q15 = 0;
     s_lock.result.capture_raw = 0U;
     s_lock.result.output_raw = 0U;
+    s_lock.result.resonance_freq_hz = 0UL;
+    s_lock.result.fn_hz = 0UL;
 }
 
 static void APPLOCK_ClearFilter(void)
@@ -473,27 +602,183 @@ static void APPLOCK_EnterSoft(uint32_t r_q15, int32_t error_q15)
     s_lock.result.error_q15 = error_q15;
     s_lock.result.capture_raw = s_lock.output_raw;
     s_lock.result.output_raw = s_lock.output_raw;
+    s_lock.result.resonance_done = false;
+    s_lock.result.resonance_freq_hz = 0UL;
+    s_lock.result.fn_hz = 0UL;
 }
 
 static void APPLOCK_ProcessSoft(uint32_t r_q15)
 {
     int32_t error_q15;
+    int32_t output_q8;
+
+    output_q8 = APPLOCK_RunPiQ8(r_q15, &error_q15);
+
+    s_lock.output_raw = APPLOCK_Q8ToRaw(output_q8);
+    APPRTLOOP_WriteRaw(s_lock.output_raw);
+}
+
+static int32_t APPLOCK_RunPiQ8(uint32_t r_q15, int32_t *error_out)
+{
+    int32_t error_q15;
     int32_t control_error;
     int32_t p_q8;
-    int32_t output_q8;
 
     error_q15 = (int32_t)s_lock.r_target_q15 - (int32_t)r_q15;
     control_error = (int32_t)s_lock.polarity * error_q15;
 
-    /* Integrator lives in DAC raw Q8 units and is clamped to the safe range. */
+    /*
+     * Integrator lives in DAC raw Q8 units. The same PI core is used by soft
+     * hold and resonance sweep so the injected sine is added on top of the
+     * live PI output instead of owning the DAC path separately.
+     */
     s_lock.integrator_q8 += control_error / (int32_t)(1UL << APPLOCK_SOFT_KI_Q8_SHIFT);
     s_lock.integrator_q8 = APPLOCK_ClampQ8(s_lock.integrator_q8);
 
     p_q8 = control_error / (int32_t)(1UL << APPLOCK_SOFT_KP_Q8_SHIFT);
-    output_q8 = APPLOCK_ClampQ8(s_lock.integrator_q8 + p_q8);
 
+    if (error_out != NULL) {
+        *error_out = error_q15;
+    }
+
+    return APPLOCK_ClampQ8(s_lock.integrator_q8 + p_q8);
+}
+
+static void APPLOCK_StartResonancePoint(uint32_t freq_hz,
+                                        uint32_t step_hz,
+                                        uint32_t end_hz,
+                                        uint16_t samples_target,
+                                        AppLockResonanceStage_t stage)
+{
+    s_lock.resonance_stage = stage;
+    s_lock.resonance_freq_hz = freq_hz;
+    s_lock.resonance_step_hz = step_hz;
+    s_lock.resonance_end_hz = end_hz;
+    s_lock.resonance_samples_target = samples_target;
+    s_lock.resonance_samples_done = 0U;
+    s_lock.resonance_phase = 0UL;
+    s_lock.resonance_phase_step =
+        (uint32_t)(((uint64_t)freq_hz << 32) / APPLOCK_SAMPLE_RATE_HZ);
+    s_lock.resonance_i_acc = 0;
+    s_lock.resonance_q_acc = 0;
+
+    s_lock.result.resonance_freq_hz = freq_hz;
+}
+
+static void APPLOCK_ProcessResonance(uint32_t r_q15)
+{
+    uint8_t sin_index;
+    uint8_t cos_index;
+    int16_t sin_q15;
+    int16_t cos_q15;
+    int32_t error_q15;
+    int32_t pi_output_q8;
+    int32_t inj_raw;
+    int32_t output_q8;
+
+    pi_output_q8 = APPLOCK_RunPiQ8(r_q15, &error_q15);
+
+    /*
+     * DDS injection and IQ references share the same phase accumulator. The
+     * sine perturbs the PZT, and the cosine/sine pair measures the response
+     * at exactly that injected frequency.
+     */
+    s_lock.resonance_phase += s_lock.resonance_phase_step;
+    sin_index = (uint8_t)(s_lock.resonance_phase >> 24);
+    cos_index = (uint8_t)((sin_index + APPLOCK_COS_TABLE_OFFSET) & APPLOCK_SINE_TABLE_MASK);
+    sin_q15 = s_lock_sine_q15[sin_index];
+    cos_q15 = s_lock_sine_q15[cos_index];
+
+    inj_raw = ((int32_t)APPLOCK_RESONANCE_INJ_AMP_RAW * (int32_t)sin_q15) >> 15;
+    output_q8 = APPLOCK_ClampQ8(pi_output_q8 + (inj_raw << 8));
     s_lock.output_raw = APPLOCK_Q8ToRaw(output_q8);
     APPRTLOOP_WriteRaw(s_lock.output_raw);
+
+    s_lock.resonance_i_acc += (int64_t)error_q15 * (int64_t)cos_q15;
+    s_lock.resonance_q_acc += (int64_t)error_q15 * (int64_t)sin_q15;
+    s_lock.resonance_samples_done++;
+
+    if (s_lock.resonance_samples_done >= s_lock.resonance_samples_target) {
+        APPLOCK_FinishResonancePoint();
+    }
+}
+
+static void APPLOCK_FinishResonancePoint(void)
+{
+    uint64_t amp2;
+    uint32_t next_freq;
+    uint32_t fine_start;
+    uint32_t fine_end;
+
+    amp2 = APPLOCK_ComputeIqAmp2();
+    if ((s_lock.resonance_best_hz == 0UL) || (amp2 > s_lock.resonance_best_amp2)) {
+        s_lock.resonance_best_amp2 = amp2;
+        s_lock.resonance_best_hz = s_lock.resonance_freq_hz;
+    }
+
+    next_freq = s_lock.resonance_freq_hz + s_lock.resonance_step_hz;
+    if (next_freq <= s_lock.resonance_end_hz) {
+        APPLOCK_StartResonancePoint(next_freq,
+                                    s_lock.resonance_step_hz,
+                                    s_lock.resonance_end_hz,
+                                    s_lock.resonance_samples_target,
+                                    s_lock.resonance_stage);
+        return;
+    }
+
+    if (s_lock.resonance_stage == APPLOCK_RESONANCE_STAGE_COARSE) {
+        fine_start = (s_lock.resonance_best_hz > APPLOCK_RESONANCE_FINE_SPAN_HZ) ?
+                     (s_lock.resonance_best_hz - APPLOCK_RESONANCE_FINE_SPAN_HZ) :
+                     APPLOCK_RESONANCE_COARSE_START_HZ;
+        if (fine_start < APPLOCK_RESONANCE_COARSE_START_HZ) {
+            fine_start = APPLOCK_RESONANCE_COARSE_START_HZ;
+        }
+
+        fine_end = s_lock.resonance_best_hz + APPLOCK_RESONANCE_FINE_SPAN_HZ;
+        if (fine_end > APPLOCK_RESONANCE_COARSE_END_HZ) {
+            fine_end = APPLOCK_RESONANCE_COARSE_END_HZ;
+        }
+
+        s_lock.resonance_best_amp2 = 0ULL;
+        s_lock.resonance_best_hz = 0UL;
+        APPLOCK_StartResonancePoint(fine_start,
+                                    APPLOCK_RESONANCE_FINE_STEP_HZ,
+                                    fine_end,
+                                    APPLOCK_RESONANCE_FINE_SAMPLES,
+                                    APPLOCK_RESONANCE_STAGE_FINE);
+        return;
+    }
+
+    /*
+     * TODO: estimate Q from half-power bandwidth after storing or streaming
+     * per-frequency response values. First version only reports fn.
+     */
+    s_lock.state = APPLOCK_STATE_SOFT;
+    s_lock.resonance_stage = APPLOCK_RESONANCE_STAGE_IDLE;
+    s_lock.result.resonance_done = true;
+    s_lock.result.fn_hz = s_lock.resonance_best_hz;
+    s_lock.result.resonance_freq_hz = s_lock.resonance_best_hz;
+    APPLOCK_ClearFilter();
+}
+
+static uint64_t APPLOCK_ComputeIqAmp2(void)
+{
+    int64_t i_scaled;
+    int64_t q_scaled;
+    uint64_t i_abs;
+    uint64_t q_abs;
+
+    /*
+     * Compare I^2 + Q^2 only at frequency boundaries. The shift keeps the
+     * square inside uint64_t while preserving enough relative peak information
+     * for first-cut resonance selection.
+     */
+    i_scaled = s_lock.resonance_i_acc >> APPLOCK_IQ_AMP_SHIFT;
+    q_scaled = s_lock.resonance_q_acc >> APPLOCK_IQ_AMP_SHIFT;
+    i_abs = (i_scaled < 0) ? (uint64_t)(-i_scaled) : (uint64_t)i_scaled;
+    q_abs = (q_scaled < 0) ? (uint64_t)(-q_scaled) : (uint64_t)q_scaled;
+
+    return (i_abs * i_abs) + (q_abs * q_abs);
 }
 
 static void APPLOCK_Fail(void)

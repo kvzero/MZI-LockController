@@ -28,6 +28,15 @@ bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
 void APPLOCK_Stop(void);
 
 /**
+ * @brief Start the first-cut resonance sweep while soft PI keeps holding lock.
+ *
+ * The sweep adds a small DDS sine injection on top of the PI output and uses
+ * IQ accumulation to find the strongest response frequency. Q estimation and
+ * notch configuration are intentionally left for later steps.
+ */
+bool APPLOCK_StartResonanceSweep(void);
+
+/**
  * @brief Check whether soft-lock capture or hold has failed.
  */
 bool APPLOCK_HasError(void);
