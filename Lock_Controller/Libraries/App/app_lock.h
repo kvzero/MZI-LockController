@@ -28,16 +28,6 @@ bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
 void APPLOCK_Stop(void);
 
 /**
- * @brief Check whether the lock backend currently owns the realtime loop.
- */
-bool APPLOCK_IsActive(void);
-
-/**
- * @brief Check whether capture has entered low-bandwidth PI hold.
- */
-bool APPLOCK_IsSoftLocked(void);
-
-/**
  * @brief Check whether soft-lock capture or hold has failed.
  */
 bool APPLOCK_HasError(void);

@@ -2,7 +2,7 @@
 
 #include "app_hardware.h"
 
-#define APPSCAN_MEDIAN_WINDOW  9U
+#define APPSCAN_MEDIAN_WINDOW  7U
 
 typedef struct {
     bool     active;
@@ -31,7 +31,7 @@ static AppScanState_t s_scan;
 static void APPSCAN_ClearState(void);
 static uint32_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample);
 static bool APPSCAN_PushMedian(uint32_t value, uint32_t *median_out);
-static uint32_t APPSCAN_Median9(const uint32_t *values);
+static uint32_t APPSCAN_Median(const uint32_t *values);
 static void APPSCAN_AdvanceWaveform(void);
 static void APPSCAN_Finish(void);
 
@@ -98,11 +98,25 @@ const AppScanResult_t *APPSCAN_GetResult(void)
 
 void APPSCAN_OnSample(const AppRtloopSample_t *sample)
 {
+    bool finish_after_sample;
     uint32_t r_q15;
     uint32_t r_med_q15;
 
     if (!s_scan.active || (sample == NULL)) {
         return;
+    }
+
+    finish_after_sample = (s_scan.direction < 0) &&
+                          (s_scan.dac_raw == 0U) &&
+                          (((uint8_t)(s_scan.edge_count + 1U) / 2U) >= s_scan.cycles_total);
+
+    /*
+     * This sample belongs to the DAC code that was already active. For all
+     * non-final samples, write the next DAC code before doing the R/median work
+     * so the analog output gets the full remaining sample period to settle.
+     */
+    if (!finish_after_sample) {
+        APPSCAN_AdvanceWaveform();
     }
 
     r_q15 = APPSCAN_ComputeRatioQ15(sample);
@@ -117,7 +131,13 @@ void APPSCAN_OnSample(const AppRtloopSample_t *sample)
         }
     }
 
-    APPSCAN_AdvanceWaveform();
+    if (finish_after_sample) {
+        s_scan.direction = 1;
+        s_scan.edge_count++;
+        s_scan.cycles_done = (uint8_t)(s_scan.edge_count / 2U);
+        s_scan.result.cycles_done = s_scan.cycles_done;
+        APPSCAN_Finish();
+    }
 }
 
 static void APPSCAN_ClearState(void)
@@ -180,11 +200,11 @@ static bool APPSCAN_PushMedian(uint32_t value, uint32_t *median_out)
         return false;
     }
 
-    *median_out = APPSCAN_Median9(s_scan.median_buf);
+    *median_out = APPSCAN_Median(s_scan.median_buf);
     return true;
 }
 
-static uint32_t APPSCAN_Median9(const uint32_t *values)
+static uint32_t APPSCAN_Median(const uint32_t *values)
 {
     uint32_t sorted[APPSCAN_MEDIAN_WINDOW];
     uint32_t key;

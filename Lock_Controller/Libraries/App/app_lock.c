@@ -12,7 +12,7 @@
  * Resonance identification and hard-lock mode will reuse this backend later,
  * but they are intentionally not implemented in this first soft-lock step.
  */
-#define APPLOCK_MEDIAN_WINDOW       9U
+#define APPLOCK_MEDIAN_WINDOW       7U
 #define APPLOCK_SLOPE_VOTE_WINDOW  32U
 #define APPLOCK_SLOPE_MIN_VOTES     8U
 
@@ -77,7 +77,7 @@ static void APPLOCK_ClearState(void);
 static void APPLOCK_ClearFilter(void);
 static uint32_t APPLOCK_ComputeRatioQ15(const AppRtloopSample_t *sample);
 static bool APPLOCK_PushMedian(uint32_t value, uint32_t *median_out);
-static uint32_t APPLOCK_Median9(const uint32_t *values);
+static uint32_t APPLOCK_Median(const uint32_t *values);
 static void APPLOCK_ClearSlopeVotes(void);
 static void APPLOCK_AddSlopeVote(int8_t vote);
 static bool APPLOCK_DecidePolarity(int8_t *polarity);
@@ -146,16 +146,6 @@ void APPLOCK_Stop(void)
     s_lock.result.active = false;
 }
 
-bool APPLOCK_IsActive(void)
-{
-    return s_lock.active;
-}
-
-bool APPLOCK_IsSoftLocked(void)
-{
-    return s_lock.result.soft_locked;
-}
-
 bool APPLOCK_HasError(void)
 {
     return s_lock.error || s_lock.result.error;
@@ -188,9 +178,7 @@ void APPLOCK_OnSample(const AppRtloopSample_t *sample)
 
         case APPLOCK_STATE_SOFT:
             r_q15 = APPLOCK_ComputeRatioQ15(sample);
-            if (APPLOCK_PushMedian(r_q15, &r_q15)) {
-                APPLOCK_ProcessSoft(r_q15);
-            }
+            APPLOCK_ProcessSoft(r_q15);
             break;
 
         case APPLOCK_STATE_IDLE:
@@ -289,11 +277,11 @@ static bool APPLOCK_PushMedian(uint32_t value, uint32_t *median_out)
         return false;
     }
 
-    *median_out = APPLOCK_Median9(s_lock.median_buf);
+    *median_out = APPLOCK_Median(s_lock.median_buf);
     return true;
 }
 
-static uint32_t APPLOCK_Median9(const uint32_t *values)
+static uint32_t APPLOCK_Median(const uint32_t *values)
 {
     uint32_t sorted[APPLOCK_MEDIAN_WINDOW];
     uint32_t key;
@@ -506,10 +494,6 @@ static void APPLOCK_ProcessSoft(uint32_t r_q15)
 
     s_lock.output_raw = APPLOCK_Q8ToRaw(output_q8);
     APPRTLOOP_WriteRaw(s_lock.output_raw);
-
-    s_lock.result.r_now_q15 = r_q15;
-    s_lock.result.error_q15 = error_q15;
-    s_lock.result.output_raw = s_lock.output_raw;
 }
 
 static void APPLOCK_Fail(void)
