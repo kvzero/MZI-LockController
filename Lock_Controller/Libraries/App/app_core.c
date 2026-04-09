@@ -8,6 +8,7 @@ static const AppPageOps_t *s_page_ops = NULL;
 static const AppPageOps_t * const s_page_table[APP_PAGE_COUNT] = {
     &APP_PAGE_WAIT_OPS,
     &APP_PAGE_ACQUIRE_OPS,
+    &APP_PAGE_LOCK_OPS,
     &APP_PAGE_FAULT_OPS,
 };
 

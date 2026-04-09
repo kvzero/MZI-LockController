@@ -1569,6 +1569,11 @@
               <FilePath>..\Libraries\App\app_page_fault.c</FilePath>
             </File>
             <File>
+              <FileName>app_page_lock.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Libraries\App\app_page_lock.c</FilePath>
+            </File>
+            <File>
               <FileName>app_page_wait.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Libraries\App\app_page_wait.c</FilePath>

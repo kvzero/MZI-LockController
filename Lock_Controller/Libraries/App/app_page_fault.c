@@ -32,6 +32,9 @@ static const char *APPFAULT_GetFaultText(FaultCode_t fault)
         case APP_FAULT_LOCK:
             return "Lock capture failed";
 
+        case APP_FAULT_CONTRAST:
+            return "Contrast too low";
+
         case APP_FAULT_NONE:
         default:
             return "Unknown fault";

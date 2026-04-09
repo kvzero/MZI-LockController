@@ -11,6 +11,7 @@
 #define APPACQ_OFFSET_SAMPLES 16U
 #define APPACQ_SCAN_CYCLES    3U
 #define APPACQ_SUMMARY_HOLD_MS 1000U
+#define APPACQ_CONTRAST_MIN_Q15 16384U
 
 static void APPACQ_Enter(void);
 static void APPACQ_Process(void);
@@ -46,6 +47,7 @@ static void APPACQ_Enter(void)
     g_rt.acquire.scan.valid = false;
     g_rt.lock.active = false;
     g_rt.lock.soft_locked = false;
+    g_rt.lock.hard_locked = false;
     g_rt.lock.resonance_done = false;
     g_rt.lock.error = false;
     g_rt.lock.polarity = 0;
@@ -126,6 +128,7 @@ static void APPACQ_Process(void)
         case ACQ_STEP_SOFTLOCK_PREP:
             g_rt.lock.active = false;
             g_rt.lock.soft_locked = false;
+            g_rt.lock.hard_locked = false;
             g_rt.lock.resonance_done = false;
             g_rt.lock.error = false;
             g_rt.lock.polarity = 0;
@@ -137,9 +140,14 @@ static void APPACQ_Process(void)
             g_rt.lock.resonance_freq_hz = 0UL;
             g_rt.lock.fn_hz = 0UL;
 
+            if (g_rt.acquire.scan.contrast_q15 < APPACQ_CONTRAST_MIN_Q15) {
+                APP_SetFault(APP_FAULT_CONTRAST);
+                return;
+            }
+
             if (!APPLOCK_StartSoft(g_rt.acquire.offset.iout_offset_raw,
                                    g_rt.acquire.offset.iref_offset_raw,
-                                   g_rt.acquire.scan.r_target_q15)) {
+                                   &g_rt.acquire.scan)) {
                 APP_SetFault(APP_FAULT_LOCK);
                 return;
             }
@@ -194,8 +202,13 @@ static void APPACQ_Process(void)
             }
             break;
 
-        case ACQ_STEP_OFFSET_DONE:
         case ACQ_STEP_RESONANCE_DONE:
+            if (APPACQ_StepElapsed(APPACQ_SUMMARY_HOLD_MS)) {
+                APP_GotoPage(APP_PAGE_LOCK);
+            }
+            break;
+
+        case ACQ_STEP_OFFSET_DONE:
         case ACQ_STEP_IDLE:
         default:
             break;
@@ -286,8 +299,9 @@ static void APPACQ_Render(void)
                            (unsigned long)((g_rt.lock.fn_hz % 1000UL) / 100UL));
             APPW_WriteBodyLine(24, line);
             APPW_WriteBodyLine(42, "Q : --");
-            APPW_WriteBodyLine(58, "Notch TODO");
+            APPW_WriteBodyLine(58, "Entering lock...");
             break;
+
     }
 }
 

@@ -17,6 +17,7 @@ typedef struct {
 
 extern const AppPageOps_t APP_PAGE_WAIT_OPS;
 extern const AppPageOps_t APP_PAGE_ACQUIRE_OPS;
+extern const AppPageOps_t APP_PAGE_LOCK_OPS;
 extern const AppPageOps_t APP_PAGE_FAULT_OPS;
 
 void APP_GotoPage(AppPage_t page);

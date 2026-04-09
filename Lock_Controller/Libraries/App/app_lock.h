@@ -20,7 +20,7 @@ void APPLOCK_Reset(void);
  */
 bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
                        uint16_t iref_offset_raw,
-                       uint32_t r_target_q15);
+                       const AppScanResult_t *scan_result);
 
 /**
  * @brief Stop the active lock path, if any.
@@ -35,6 +35,14 @@ void APPLOCK_Stop(void);
  * notch configuration are intentionally left for later steps.
  */
 bool APPLOCK_StartResonanceSweep(void);
+
+/**
+ * @brief Switch from soft hold into hard lock using the measured resonance fn.
+ *
+ * The hard path keeps the same realtime loop active, enables a fixed-point
+ * notch around the measured resonance, and applies the harder PI gains.
+ */
+bool APPLOCK_StartHardLock(void);
 
 /**
  * @brief Check whether soft-lock capture or hold has failed.

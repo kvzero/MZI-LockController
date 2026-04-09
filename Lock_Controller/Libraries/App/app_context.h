@@ -10,6 +10,7 @@
 typedef enum {
     APP_PAGE_WAIT = 0,
     APP_PAGE_ACQUIRE,
+    APP_PAGE_LOCK,
     APP_PAGE_FAULT,
     APP_PAGE_COUNT,
 } AppPage_t;
@@ -19,6 +20,7 @@ typedef enum {
     APP_FAULT_HVAMP,
     APP_FAULT_ADC,
     APP_FAULT_LOCK,
+    APP_FAULT_CONTRAST,
 } FaultCode_t;
 
 /**
@@ -66,6 +68,7 @@ typedef struct {
 typedef struct {
     bool     active;
     bool     soft_locked;
+    bool     hard_locked;
     bool     resonance_done;
     bool     error;
     int8_t   polarity;

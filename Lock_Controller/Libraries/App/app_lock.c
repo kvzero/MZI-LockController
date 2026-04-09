@@ -3,43 +3,70 @@
 #include "app_hardware.h"
 
 /*
- * Soft-lock capture path:
- *   1. Ramp the PZT output to the HVDAC mid raw code to avoid a voltage step.
- *   2. Sweep downward one raw code per realtime sample until R crosses Rtarget.
- *   3. Use a short majority vote on the local slope to choose PI polarity.
- *   4. Enter a conservative low-bandwidth PI hold.
- *
- * Resonance identification reuses the same soft PI hold below: a small DDS
- * sine is added on top of PI output, while IQ accumulation estimates the
- * response at each injected frequency. Hard-lock/notch mode is still left for
- * a later step.
+ * Lock backend:
+ *   - ramp to mid-scale, sweep down, and capture the first valid lock point
+ *   - hold with soft PI while resonance sweep injects a small DDS tone
+ *   - switch to hard PI with the measured main-notch frequency
  */
-#define APPLOCK_MEDIAN_WINDOW       7U
-#define APPLOCK_SLOPE_VOTE_WINDOW  32U
-#define APPLOCK_SLOPE_MIN_VOTES     8U
+
+/* Capture/filter settings used while sweeping down to the first lock point. */
+#define APPLOCK_MEDIAN_WINDOW        7U
+#define APPLOCK_SLOPE_VOTE_WINDOW   32U
+#define APPLOCK_SLOPE_MIN_VOTES      8U
 
 /*
- * First-cut soft-lock gains. The integrator is stored in DAC raw Q8 units so
- * the controller can make sub-raw-code accumulated moves while still writing
- * integer raw codes to the DAC. These constants are intentionally local and
- * must be tuned on the real interferometer.
+ * Soft-lock PI gains in Q8: 256 == 1.0x.
+ * Current values:
+ *   Kp =  64 / 256 = 0.25
+ *   Ki =  12 / 256 = 0.046875
  */
-#define APPLOCK_SOFT_KP_Q8_SHIFT    2U
-#define APPLOCK_SOFT_KI_Q8_SHIFT    6U
+#define APPLOCK_SOFT_KP_GAIN_Q8     64L
+#define APPLOCK_SOFT_KI_GAIN_Q8     12L
 
-#define APPLOCK_SAMPLE_RATE_HZ                 200000UL
-#define APPLOCK_RESONANCE_INJ_AMP_RAW             64U
-#define APPLOCK_RESONANCE_COARSE_START_HZ       5000UL
-#define APPLOCK_RESONANCE_COARSE_END_HZ        40000UL
-#define APPLOCK_RESONANCE_COARSE_STEP_HZ         500UL
-#define APPLOCK_RESONANCE_COARSE_SAMPLES        1024U
-#define APPLOCK_RESONANCE_FINE_SPAN_HZ          1000UL
-#define APPLOCK_RESONANCE_FINE_STEP_HZ           100UL
-#define APPLOCK_RESONANCE_FINE_SAMPLES          2048U
-#define APPLOCK_SINE_TABLE_SIZE                  256U
-#define APPLOCK_SINE_TABLE_MASK                 0xFFU
-#define APPLOCK_COS_TABLE_OFFSET                  64U
-#define APPLOCK_IQ_AMP_SHIFT                      16U
+/*
+ * Hard-lock PI gains in Q8: 256 == 1.0x.
+ * APPLOCK_HARD_ERROR_LP_SHIFT controls the two cascaded first-order low-pass
+ * stages on the hard-lock error path: larger value means heavier filtering.
+ * APPLOCK_NOTCH_BW_HZ is the approximate main-notch bandwidth in hertz. Its
+ * center frequency comes from the measured resonance fn.
+ */
+#define APPLOCK_HARD_KP_GAIN_Q8      8000L
+#define APPLOCK_HARD_KI_GAIN_Q8      1000L
+#define APPLOCK_NOTCH_BW_HZ          7710UL
+#define APPLOCK_HARD_ERROR_LP_SHIFT  2U
+
+/*
+ * Resonance sweep / IQ identification settings.
+ * The first version still uses a fixed full-range coarse sweep plus a narrow
+ * fine sweep around the best coarse point.
+ */
+#define APPLOCK_RESONANCE_INJ_AMP_RAW        64U
+#define APPLOCK_RESONANCE_COARSE_START_HZ  5000UL
+#define APPLOCK_RESONANCE_COARSE_END_HZ   40000UL
+#define APPLOCK_RESONANCE_COARSE_STEP_HZ    500UL
+#define APPLOCK_RESONANCE_COARSE_SAMPLES   1024U
+#define APPLOCK_RESONANCE_FINE_SPAN_HZ     1000UL
+#define APPLOCK_RESONANCE_FINE_STEP_HZ      100UL
+#define APPLOCK_RESONANCE_FINE_SAMPLES     2048U
+#define APPLOCK_IQ_AMP_SHIFT                 16U
+
+/*
+ * Contrast-based error normalization.
+ *   APPLOCK_CONTRAST_REF_Q15   = 0.75
+ *   APPLOCK_ERROR_GAIN_MIN_Q15 = 0.5x
+ *   APPLOCK_ERROR_GAIN_MAX_Q15 = 2.0x
+ */
+#define APPLOCK_CONTRAST_REF_Q15   24576U
+#define APPLOCK_ERROR_GAIN_MIN_Q15 16384UL
+#define APPLOCK_ERROR_GAIN_MAX_Q15 65536UL
+
+/* Shared realtime constants used by DDS and notch configuration. */
+#define APPLOCK_SAMPLE_RATE_HZ   200000UL
+
+/* DDS lookup-table implementation constants. */
+#define APPLOCK_SINE_TABLE_SIZE      256U
+#define APPLOCK_SINE_TABLE_MASK     0xFFU
+#define APPLOCK_COS_TABLE_OFFSET   (APPLOCK_SINE_TABLE_SIZE / 4U)
 
 typedef enum {
     APPLOCK_STATE_IDLE = 0,
@@ -47,6 +74,7 @@ typedef enum {
     APPLOCK_STATE_SWEEP_DOWN,
     APPLOCK_STATE_SOFT,
     APPLOCK_STATE_RESONANCE,
+    APPLOCK_STATE_HARD,
 } AppLockState_t;
 
 typedef enum {
@@ -54,6 +82,114 @@ typedef enum {
     APPLOCK_RESONANCE_STAGE_COARSE,
     APPLOCK_RESONANCE_STAGE_FINE,
 } AppLockResonanceStage_t;
+
+typedef struct {
+    int32_t b1_q14;
+    int32_t a1_q14;
+    int32_t a2_q14;
+    int32_t x1;
+    int32_t x2;
+    int32_t y1;
+    int32_t y2;
+} AppLockNotchState_t;
+
+/*
+ * Private lock engine state. These fields are updated from the realtime sample
+ * path; only the summarized `result` block is copied out to g_rt for UI/process
+ * use.
+ */
+typedef struct {
+    bool           active;
+    bool           error;
+    AppLockState_t state;
+
+    uint16_t max_raw;
+    uint16_t mid_raw;
+    uint16_t output_raw;
+    uint32_t r_target_q15;
+
+    uint32_t median_buf[APPLOCK_MEDIAN_WINDOW];
+    uint8_t  median_count;
+    uint8_t  median_index;
+
+    int8_t  slope_votes[APPLOCK_SLOPE_VOTE_WINDOW];
+    uint8_t slope_vote_count;
+    uint8_t slope_vote_index;
+    uint8_t slope_pos_votes;
+    uint8_t slope_neg_votes;
+
+    bool     prev_valid;
+    uint32_t prev_r_q15;
+    int32_t  prev_error_q15;
+    bool     crossing_seen;
+    uint16_t crossing_raw;
+    uint32_t crossing_r_q15;
+    int32_t  crossing_error_q15;
+
+    int8_t  polarity;
+    int32_t integrator_q8;
+    bool    hard_lpf_valid;
+    int32_t hard_lpf_error_1;
+    int32_t hard_lpf_error_2;
+    uint16_t contrast_q15;
+    uint32_t span_q15;
+    uint32_t error_gain_q15;
+
+    AppLockNotchState_t notch_main;
+
+    AppLockResonanceStage_t resonance_stage;
+    uint32_t resonance_freq_hz;
+    uint32_t resonance_step_hz;
+    uint32_t resonance_end_hz;
+    uint16_t resonance_samples_target;
+    uint16_t resonance_samples_done;
+    uint32_t resonance_phase;
+    uint32_t resonance_phase_step;
+    int64_t  resonance_i_acc;
+    int64_t  resonance_q_acc;
+    uint64_t resonance_best_amp2;
+    uint32_t resonance_best_hz;
+
+    AppLockRuntime_t result;
+} AppLockStateStore_t;
+
+static AppLockStateStore_t s_lock;
+
+static void APPLOCK_ClearState(void);
+static void APPLOCK_ClearFilter(void);
+static uint32_t APPLOCK_ComputeRatioQ15(const AppRtloopSample_t *sample);
+static bool APPLOCK_PushMedian(uint32_t value, uint32_t *median_out);
+static uint32_t APPLOCK_Median(const uint32_t *values);
+static void APPLOCK_ClearSlopeVotes(void);
+static void APPLOCK_AddSlopeVote(int8_t vote);
+static bool APPLOCK_DecidePolarity(int8_t *polarity);
+static bool APPLOCK_CrossedTarget(int32_t prev_error, int32_t error);
+static void APPLOCK_ProcessRampToCenter(void);
+static void APPLOCK_ProcessSweepDown(uint32_t r_q15);
+static void APPLOCK_EnterSoft(uint32_t r_q15, int32_t error_q15);
+static void APPLOCK_ProcessSoft(uint32_t r_q15);
+static int32_t APPLOCK_RunPiQ8(uint32_t r_q15, int32_t *error_out);
+static void APPLOCK_ProcessHard(uint32_t r_q15);
+static int32_t APPLOCK_RunHardPiQ8(uint32_t r_q15);
+static int32_t APPLOCK_NormalizeControlErrorQ15(int32_t control_error);
+static void APPLOCK_ConfigNotch(uint32_t freq_hz);
+static void APPLOCK_ConfigNotchStage(AppLockNotchState_t *notch,
+                                     uint32_t freq_hz,
+                                     uint32_t bw_hz);
+static int32_t APPLOCK_NotchStageStep(AppLockNotchState_t *notch, int32_t value);
+static int32_t APPLOCK_NotchStep(int32_t value);
+static int32_t APPLOCK_SineQ14FromPhase(uint32_t phase);
+static void APPLOCK_StartResonancePoint(uint32_t freq_hz,
+                                        uint32_t step_hz,
+                                        uint32_t end_hz,
+                                        uint16_t samples_target,
+                                        AppLockResonanceStage_t stage);
+static void APPLOCK_ProcessResonance(uint32_t r_q15);
+static void APPLOCK_FinishResonancePoint(void);
+static uint64_t APPLOCK_ComputeIqAmp2(void);
+static void APPLOCK_Fail(void);
+static int32_t APPLOCK_ClampQ8(int32_t value_q8);
+static uint16_t APPLOCK_Q8ToRaw(int32_t value_q8);
 
 /*
  * 256-point Q15 sine table for the resonance DDS. Cosine is the same table
@@ -95,86 +231,6 @@ static const int16_t s_lock_sine_q15[APPLOCK_SINE_TABLE_SIZE] = {
      -6393,  -5602,  -4808,  -4011,  -3212,  -2410,  -1608,   -804
 };
 
-/*
- * Private lock engine state. These fields are updated from the realtime sample
- * path; only the summarized `result` block is copied out to g_rt for UI/process
- * use.
- */
-typedef struct {
-    bool           active;
-    bool           error;
-    AppLockState_t state;
-
-    uint16_t max_raw;
-    uint16_t mid_raw;
-    uint16_t output_raw;
-    uint32_t r_target_q15;
-
-    uint32_t median_buf[APPLOCK_MEDIAN_WINDOW];
-    uint8_t  median_count;
-    uint8_t  median_index;
-
-    int8_t  slope_votes[APPLOCK_SLOPE_VOTE_WINDOW];
-    uint8_t slope_vote_count;
-    uint8_t slope_vote_index;
-    uint8_t slope_pos_votes;
-    uint8_t slope_neg_votes;
-
-    bool     prev_valid;
-    uint32_t prev_r_q15;
-    int32_t  prev_error_q15;
-    bool     crossing_seen;
-    uint16_t crossing_raw;
-    uint32_t crossing_r_q15;
-    int32_t  crossing_error_q15;
-
-    int8_t  polarity;
-    int32_t integrator_q8;
-
-    AppLockResonanceStage_t resonance_stage;
-    uint32_t resonance_freq_hz;
-    uint32_t resonance_step_hz;
-    uint32_t resonance_end_hz;
-    uint16_t resonance_samples_target;
-    uint16_t resonance_samples_done;
-    uint32_t resonance_phase;
-    uint32_t resonance_phase_step;
-    int64_t  resonance_i_acc;
-    int64_t  resonance_q_acc;
-    uint64_t resonance_best_amp2;
-    uint32_t resonance_best_hz;
-
-    AppLockRuntime_t result;
-} AppLockStateStore_t;
-
-static AppLockStateStore_t s_lock;
-
-static void APPLOCK_ClearState(void);
-static void APPLOCK_ClearFilter(void);
-static uint32_t APPLOCK_ComputeRatioQ15(const AppRtloopSample_t *sample);
-static bool APPLOCK_PushMedian(uint32_t value, uint32_t *median_out);
-static uint32_t APPLOCK_Median(const uint32_t *values);
-static void APPLOCK_ClearSlopeVotes(void);
-static void APPLOCK_AddSlopeVote(int8_t vote);
-static bool APPLOCK_DecidePolarity(int8_t *polarity);
-static bool APPLOCK_CrossedTarget(int32_t prev_error, int32_t error);
-static void APPLOCK_ProcessRampToCenter(void);
-static void APPLOCK_ProcessSweepDown(uint32_t r_q15);
-static void APPLOCK_EnterSoft(uint32_t r_q15, int32_t error_q15);
-static void APPLOCK_ProcessSoft(uint32_t r_q15);
-static int32_t APPLOCK_RunPiQ8(uint32_t r_q15, int32_t *error_out);
-static void APPLOCK_StartResonancePoint(uint32_t freq_hz,
-                                        uint32_t step_hz,
-                                        uint32_t end_hz,
-                                        uint16_t samples_target,
-                                        AppLockResonanceStage_t stage);
-static void APPLOCK_ProcessResonance(uint32_t r_q15);
-static void APPLOCK_FinishResonancePoint(void);
-static uint64_t APPLOCK_ComputeIqAmp2(void);
-static void APPLOCK_Fail(void);
-static int32_t APPLOCK_ClampQ8(int32_t value_q8);
-static uint16_t APPLOCK_Q8ToRaw(int32_t value_q8);
-
 void APPLOCK_Reset(void)
 {
     if (s_lock.active) {
@@ -186,12 +242,17 @@ void APPLOCK_Reset(void)
 
 bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
                        uint16_t iref_offset_raw,
-                       uint32_t r_target_q15)
+                       const AppScanResult_t *scan_result)
 {
+    uint32_t span_ref_q15;
+
     if (s_lock.active ||
         (g_hw == NULL) ||
         (g_hw->hvdac == NULL) ||
         (g_hw->hpdadc == NULL) ||
+        (scan_result == NULL) ||
+        !scan_result->valid ||
+        (scan_result->r_max_q15 <= scan_result->r_min_q15) ||
         (g_hw->hvdac->max_raw == 0U)) {
         return false;
     }
@@ -203,14 +264,31 @@ bool APPLOCK_StartSoft(uint16_t iout_offset_raw,
     s_lock.max_raw = g_hw->hvdac->max_raw;
     s_lock.mid_raw = (uint16_t)(s_lock.max_raw / 2U);
     s_lock.output_raw = APPRTLOOP_GetLastRaw();
-    if (s_lock.output_raw > s_lock.max_raw) {
-        s_lock.output_raw = s_lock.max_raw;
-    }
-    s_lock.r_target_q15 = r_target_q15;
+      if (s_lock.output_raw > s_lock.max_raw) {
+          s_lock.output_raw = s_lock.max_raw;
+      }
+      s_lock.r_target_q15 = scan_result->r_target_q15;
+      s_lock.contrast_q15 = scan_result->contrast_q15;
+      s_lock.span_q15 = scan_result->r_max_q15 - scan_result->r_min_q15;
+      span_ref_q15 =
+          (uint32_t)((((uint64_t)scan_result->r_target_q15 * 2ULL) *
+                      (uint64_t)APPLOCK_CONTRAST_REF_Q15) >> 15);
+      if (span_ref_q15 == 0UL) {
+          span_ref_q15 = 1UL;
+      }
+      s_lock.error_gain_q15 =
+          (uint32_t)(((uint64_t)span_ref_q15 << 15) / (uint64_t)s_lock.span_q15);
+      if (s_lock.error_gain_q15 < APPLOCK_ERROR_GAIN_MIN_Q15) {
+          s_lock.error_gain_q15 = APPLOCK_ERROR_GAIN_MIN_Q15;
+      }
+      if (s_lock.error_gain_q15 > APPLOCK_ERROR_GAIN_MAX_Q15) {
+          s_lock.error_gain_q15 = APPLOCK_ERROR_GAIN_MAX_Q15;
+      }
 
-    s_lock.result.active = true;
-    s_lock.result.r_target_q15 = r_target_q15;
-    s_lock.result.output_raw = s_lock.output_raw;
+      s_lock.result.active = true;
+      s_lock.result.r_target_q15 = scan_result->r_target_q15;
+      s_lock.result.output_raw = s_lock.output_raw;
+      s_lock.result.hard_locked = false;
     s_lock.result.resonance_done = false;
     s_lock.result.resonance_freq_hz = 0UL;
     s_lock.result.fn_hz = 0UL;
@@ -232,6 +310,7 @@ void APPLOCK_Stop(void)
     s_lock.active = false;
     s_lock.state = APPLOCK_STATE_IDLE;
     s_lock.result.active = false;
+    s_lock.result.hard_locked = false;
 }
 
 bool APPLOCK_StartResonanceSweep(void)
@@ -250,8 +329,29 @@ bool APPLOCK_StartResonanceSweep(void)
                                 APPLOCK_RESONANCE_COARSE_SAMPLES,
                                 APPLOCK_RESONANCE_STAGE_COARSE);
     s_lock.state = APPLOCK_STATE_RESONANCE;
+    s_lock.result.hard_locked = false;
     s_lock.result.resonance_done = false;
     s_lock.result.fn_hz = 0UL;
+    return true;
+}
+
+bool APPLOCK_StartHardLock(void)
+{
+    if (!s_lock.active ||
+        (s_lock.state != APPLOCK_STATE_SOFT) ||
+        !s_lock.result.soft_locked ||
+        (s_lock.result.fn_hz == 0UL)) {
+        return false;
+    }
+
+    APPLOCK_ConfigNotch(s_lock.result.fn_hz);
+
+    s_lock.integrator_q8 = (int32_t)s_lock.output_raw << 8;
+    s_lock.hard_lpf_valid = false;
+    s_lock.hard_lpf_error_1 = 0;
+    s_lock.hard_lpf_error_2 = 0;
+    s_lock.state = APPLOCK_STATE_HARD;
+    s_lock.result.hard_locked = true;
     return true;
 }
 
@@ -295,6 +395,11 @@ void APPLOCK_OnSample(const AppRtloopSample_t *sample)
             APPLOCK_ProcessResonance(r_q15);
             break;
 
+        case APPLOCK_STATE_HARD:
+            r_q15 = APPLOCK_ComputeRatioQ15(sample);
+            APPLOCK_ProcessHard(r_q15);
+            break;
+
         case APPLOCK_STATE_IDLE:
         default:
             break;
@@ -327,6 +432,19 @@ static void APPLOCK_ClearState(void)
     s_lock.crossing_error_q15 = 0;
     s_lock.polarity = 0;
     s_lock.integrator_q8 = 0;
+    s_lock.hard_lpf_valid = false;
+    s_lock.hard_lpf_error_1 = 0;
+    s_lock.hard_lpf_error_2 = 0;
+    s_lock.contrast_q15 = 0U;
+    s_lock.span_q15 = 0UL;
+    s_lock.error_gain_q15 = 0UL;
+    s_lock.notch_main.b1_q14 = 0;
+    s_lock.notch_main.a1_q14 = 0;
+    s_lock.notch_main.a2_q14 = 0;
+    s_lock.notch_main.x1 = 0;
+    s_lock.notch_main.x2 = 0;
+    s_lock.notch_main.y1 = 0;
+    s_lock.notch_main.y2 = 0;
     s_lock.resonance_stage = APPLOCK_RESONANCE_STAGE_IDLE;
     s_lock.resonance_freq_hz = 0UL;
     s_lock.resonance_step_hz = 0UL;
@@ -350,6 +468,7 @@ static void APPLOCK_ClearState(void)
 
     s_lock.result.active = false;
     s_lock.result.soft_locked = false;
+    s_lock.result.hard_locked = false;
     s_lock.result.resonance_done = false;
     s_lock.result.error = false;
     s_lock.result.polarity = 0;
@@ -595,6 +714,7 @@ static void APPLOCK_EnterSoft(uint32_t r_q15, int32_t error_q15)
 
     s_lock.result.active = true;
     s_lock.result.soft_locked = true;
+    s_lock.result.hard_locked = false;
     s_lock.result.error = false;
     s_lock.result.polarity = s_lock.polarity;
     s_lock.result.r_target_q15 = s_lock.r_target_q15;
@@ -626,22 +746,158 @@ static int32_t APPLOCK_RunPiQ8(uint32_t r_q15, int32_t *error_out)
 
     error_q15 = (int32_t)s_lock.r_target_q15 - (int32_t)r_q15;
     control_error = (int32_t)s_lock.polarity * error_q15;
+    control_error = APPLOCK_NormalizeControlErrorQ15(control_error);
 
     /*
      * Integrator lives in DAC raw Q8 units. The same PI core is used by soft
      * hold and resonance sweep so the injected sine is added on top of the
      * live PI output instead of owning the DAC path separately.
      */
-    s_lock.integrator_q8 += control_error / (int32_t)(1UL << APPLOCK_SOFT_KI_Q8_SHIFT);
+    s_lock.integrator_q8 += (control_error * APPLOCK_SOFT_KI_GAIN_Q8) >> 8;
     s_lock.integrator_q8 = APPLOCK_ClampQ8(s_lock.integrator_q8);
 
-    p_q8 = control_error / (int32_t)(1UL << APPLOCK_SOFT_KP_Q8_SHIFT);
+    p_q8 = (control_error * APPLOCK_SOFT_KP_GAIN_Q8) >> 8;
 
     if (error_out != NULL) {
         *error_out = error_q15;
     }
 
     return APPLOCK_ClampQ8(s_lock.integrator_q8 + p_q8);
+}
+
+static void APPLOCK_ProcessHard(uint32_t r_q15)
+{
+    int32_t output_q8;
+
+    output_q8 = APPLOCK_RunHardPiQ8(r_q15);
+    s_lock.output_raw = APPLOCK_Q8ToRaw(output_q8);
+    APPRTLOOP_WriteRaw(s_lock.output_raw);
+}
+
+static int32_t APPLOCK_RunHardPiQ8(uint32_t r_q15)
+{
+    int32_t error_q15;
+    int32_t control_error;
+    int32_t filtered_error;
+    int32_t p_q8;
+
+    error_q15 = (int32_t)s_lock.r_target_q15 - (int32_t)r_q15;
+    control_error = (int32_t)s_lock.polarity * error_q15;
+    control_error = APPLOCK_NormalizeControlErrorQ15(control_error);
+    filtered_error = APPLOCK_NotchStep(control_error);
+#if APPLOCK_HARD_ERROR_LP_SHIFT > 0U
+    if (!s_lock.hard_lpf_valid) {
+        s_lock.hard_lpf_error_1 = filtered_error;
+        s_lock.hard_lpf_error_2 = filtered_error;
+        s_lock.hard_lpf_valid = true;
+    } else {
+        s_lock.hard_lpf_error_1 +=
+            (filtered_error - s_lock.hard_lpf_error_1) >> APPLOCK_HARD_ERROR_LP_SHIFT;
+        s_lock.hard_lpf_error_2 +=
+            (s_lock.hard_lpf_error_1 - s_lock.hard_lpf_error_2) >> APPLOCK_HARD_ERROR_LP_SHIFT;
+    }
+    filtered_error = s_lock.hard_lpf_error_2;
+#endif
+
+    s_lock.integrator_q8 += (filtered_error * APPLOCK_HARD_KI_GAIN_Q8) >> 8;
+    s_lock.integrator_q8 = APPLOCK_ClampQ8(s_lock.integrator_q8);
+
+    p_q8 = (filtered_error * APPLOCK_HARD_KP_GAIN_Q8) >> 8;
+    return APPLOCK_ClampQ8(s_lock.integrator_q8 + p_q8);
+}
+
+static int32_t APPLOCK_NormalizeControlErrorQ15(int32_t control_error)
+{
+    if (s_lock.error_gain_q15 == 0UL) {
+        return control_error;
+    }
+
+    return (int32_t)(((int64_t)control_error * (int64_t)s_lock.error_gain_q15) >> 15);
+}
+
+static void APPLOCK_ConfigNotch(uint32_t freq_hz)
+{
+    APPLOCK_ConfigNotchStage(&s_lock.notch_main, freq_hz, APPLOCK_NOTCH_BW_HZ);
+}
+
+static void APPLOCK_ConfigNotchStage(AppLockNotchState_t *notch,
+                                     uint32_t freq_hz,
+                                     uint32_t bw_hz)
+{
+    int32_t cos_q14;
+    const int32_t q14_one = (1L << 14);
+    const uint32_t quarter_turn_phase = (1UL << 30);
+    const uint64_t q14_pi = (((uint64_t)355U << 14) + 56ULL) / 113ULL;
+    int32_t width_q14;
+    int32_t r_q14;
+
+    /*
+     * Approximate width_q14 from bandwidth in hertz:
+     *   width_q14 ~= bandwidth_hz * pi * 2^14 / fs
+     * This is evaluated only when (re)configuring hard lock, not per sample.
+     */
+    width_q14 = (int32_t)((((uint64_t)bw_hz * q14_pi) +
+                           (APPLOCK_SAMPLE_RATE_HZ / 2U)) / APPLOCK_SAMPLE_RATE_HZ);
+    if (width_q14 > q14_one) {
+        width_q14 = q14_one;
+    }
+
+    r_q14 = q14_one - width_q14;
+
+    cos_q14 = APPLOCK_SineQ14FromPhase(
+        (uint32_t)((((uint64_t)freq_hz << 32) / APPLOCK_SAMPLE_RATE_HZ) + quarter_turn_phase));
+
+    notch->b1_q14 = -2L * cos_q14;
+    notch->a1_q14 = (int32_t)((2LL * (int64_t)r_q14 * (int64_t)cos_q14) >> 14);
+    notch->a2_q14 = -(int32_t)(((int64_t)r_q14 * (int64_t)r_q14) >> 14);
+    notch->x1 = 0;
+    notch->x2 = 0;
+    notch->y1 = 0;
+    notch->y2 = 0;
+}
+
+static int32_t APPLOCK_NotchStageStep(AppLockNotchState_t *notch, int32_t value)
+{
+    int64_t acc;
+    const int32_t q14_one = (1L << 14);
+    int32_t y;
+
+    acc = (int64_t)value * q14_one;
+    acc += (int64_t)notch->b1_q14 * (int64_t)notch->x1;
+    acc += (int64_t)q14_one * (int64_t)notch->x2;
+    acc += (int64_t)notch->a1_q14 * (int64_t)notch->y1;
+    acc += (int64_t)notch->a2_q14 * (int64_t)notch->y2;
+    y = (int32_t)(acc >> 14);
+
+    notch->x2 = notch->x1;
+    notch->x1 = value;
+    notch->y2 = notch->y1;
+    notch->y1 = y;
+
+    return y;
+}
+
+static int32_t APPLOCK_NotchStep(int32_t value)
+{
+    return APPLOCK_NotchStageStep(&s_lock.notch_main, value);
+}
+
+static int32_t APPLOCK_SineQ14FromPhase(uint32_t phase)
+{
+    uint8_t index;
+    uint8_t next_index;
+    uint16_t frac;
+    int32_t sample;
+    int32_t next_sample;
+
+    index = (uint8_t)(phase >> 24);
+    next_index = (uint8_t)((index + 1U) & APPLOCK_SINE_TABLE_MASK);
+    frac = (uint16_t)((phase >> 8) & 0xFFFFU);
+    sample = s_lock_sine_q15[index];
+    next_sample = s_lock_sine_q15[next_index];
+    sample += (int32_t)(((int64_t)(next_sample - sample) * (int64_t)frac) >> 16);
+
+    return sample / 2;
 }
 
 static void APPLOCK_StartResonancePoint(uint32_t freq_hz,
@@ -755,6 +1011,7 @@ static void APPLOCK_FinishResonancePoint(void)
      */
     s_lock.state = APPLOCK_STATE_SOFT;
     s_lock.resonance_stage = APPLOCK_RESONANCE_STAGE_IDLE;
+    s_lock.result.hard_locked = false;
     s_lock.result.resonance_done = true;
     s_lock.result.fn_hz = s_lock.resonance_best_hz;
     s_lock.result.resonance_freq_hz = s_lock.resonance_best_hz;
@@ -789,6 +1046,7 @@ static void APPLOCK_Fail(void)
     s_lock.result.error = true;
     s_lock.result.active = false;
     s_lock.result.soft_locked = false;
+    s_lock.result.hard_locked = false;
     APPRTLOOP_Stop();
 }
 
