@@ -25,15 +25,19 @@
 
 /*
  * Hard-lock PI gains in Q8: 256 == 1.0x.
- * APPLOCK_HARD_ERROR_LP_SHIFT controls the two cascaded first-order low-pass
- * stages on the hard-lock error path: larger value means heavier filtering.
+ * The hard P path uses a low-shelf error shaper:
+ *   slow += (error - slow) >> LP_SHIFT
+ *   p_error = slow + ((error - slow) >> HF_GAIN_SHIFT)
+ * so low frequency error gets full P gain while high frequency error is
+ * reduced to 1 / (2^HF_GAIN_SHIFT).
  * APPLOCK_NOTCH_BW_HZ is the approximate main-notch bandwidth in hertz. Its
  * center frequency comes from the measured resonance fn.
  */
-#define APPLOCK_HARD_KP_GAIN_Q8      8000L
-#define APPLOCK_HARD_KI_GAIN_Q8      1000L
-#define APPLOCK_NOTCH_BW_HZ          7710UL
-#define APPLOCK_HARD_ERROR_LP_SHIFT  2U
+#define APPLOCK_HARD_KP_GAIN_Q8      7400L
+#define APPLOCK_HARD_KI_GAIN_Q8      900L
+#define APPLOCK_NOTCH_BW_HZ          7700UL
+#define APPLOCK_HARD_SHELF_LP_SHIFT       3U
+#define APPLOCK_HARD_SHELF_HF_GAIN_SHIFT  3U
 
 /*
  * Resonance sweep / IQ identification settings.
@@ -128,9 +132,8 @@ typedef struct {
 
     int8_t  polarity;
     int32_t integrator_q8;
-    bool    hard_lpf_valid;
-    int32_t hard_lpf_error_1;
-    int32_t hard_lpf_error_2;
+    bool    hard_shelf_valid;
+    int32_t hard_slow_error;
     uint16_t contrast_q15;
     uint32_t span_q15;
     uint32_t error_gain_q15;
@@ -347,9 +350,8 @@ bool APPLOCK_StartHardLock(void)
     APPLOCK_ConfigNotch(s_lock.result.fn_hz);
 
     s_lock.integrator_q8 = (int32_t)s_lock.output_raw << 8;
-    s_lock.hard_lpf_valid = false;
-    s_lock.hard_lpf_error_1 = 0;
-    s_lock.hard_lpf_error_2 = 0;
+    s_lock.hard_shelf_valid = false;
+    s_lock.hard_slow_error = 0;
     s_lock.state = APPLOCK_STATE_HARD;
     s_lock.result.hard_locked = true;
     return true;
@@ -432,9 +434,8 @@ static void APPLOCK_ClearState(void)
     s_lock.crossing_error_q15 = 0;
     s_lock.polarity = 0;
     s_lock.integrator_q8 = 0;
-    s_lock.hard_lpf_valid = false;
-    s_lock.hard_lpf_error_1 = 0;
-    s_lock.hard_lpf_error_2 = 0;
+    s_lock.hard_shelf_valid = false;
+    s_lock.hard_slow_error = 0;
     s_lock.contrast_q15 = 0U;
     s_lock.span_q15 = 0UL;
     s_lock.error_gain_q15 = 0UL;
@@ -778,31 +779,35 @@ static int32_t APPLOCK_RunHardPiQ8(uint32_t r_q15)
 {
     int32_t error_q15;
     int32_t control_error;
-    int32_t filtered_error;
+    int32_t notched_error;
+    int32_t slow_error;
+    int32_t p_error;
     int32_t p_q8;
 
     error_q15 = (int32_t)s_lock.r_target_q15 - (int32_t)r_q15;
     control_error = (int32_t)s_lock.polarity * error_q15;
     control_error = APPLOCK_NormalizeControlErrorQ15(control_error);
-    filtered_error = APPLOCK_NotchStep(control_error);
-#if APPLOCK_HARD_ERROR_LP_SHIFT > 0U
-    if (!s_lock.hard_lpf_valid) {
-        s_lock.hard_lpf_error_1 = filtered_error;
-        s_lock.hard_lpf_error_2 = filtered_error;
-        s_lock.hard_lpf_valid = true;
+    notched_error = APPLOCK_NotchStep(control_error);
+
+#if APPLOCK_HARD_SHELF_LP_SHIFT > 0U
+    if (!s_lock.hard_shelf_valid) {
+        s_lock.hard_slow_error = notched_error;
+        s_lock.hard_shelf_valid = true;
     } else {
-        s_lock.hard_lpf_error_1 +=
-            (filtered_error - s_lock.hard_lpf_error_1) >> APPLOCK_HARD_ERROR_LP_SHIFT;
-        s_lock.hard_lpf_error_2 +=
-            (s_lock.hard_lpf_error_1 - s_lock.hard_lpf_error_2) >> APPLOCK_HARD_ERROR_LP_SHIFT;
+        s_lock.hard_slow_error +=
+            (notched_error - s_lock.hard_slow_error) >> APPLOCK_HARD_SHELF_LP_SHIFT;
     }
-    filtered_error = s_lock.hard_lpf_error_2;
+    slow_error = s_lock.hard_slow_error;
+#else
+    slow_error = notched_error;
 #endif
 
-    s_lock.integrator_q8 += (filtered_error * APPLOCK_HARD_KI_GAIN_Q8) >> 8;
+    p_error = slow_error + ((notched_error - slow_error) >> APPLOCK_HARD_SHELF_HF_GAIN_SHIFT);
+
+    s_lock.integrator_q8 += (slow_error * APPLOCK_HARD_KI_GAIN_Q8) >> 8;
     s_lock.integrator_q8 = APPLOCK_ClampQ8(s_lock.integrator_q8);
 
-    p_q8 = (filtered_error * APPLOCK_HARD_KP_GAIN_Q8) >> 8;
+    p_q8 = (p_error * APPLOCK_HARD_KP_GAIN_Q8) >> 8;
     return APPLOCK_ClampQ8(s_lock.integrator_q8 + p_q8);
 }
 
