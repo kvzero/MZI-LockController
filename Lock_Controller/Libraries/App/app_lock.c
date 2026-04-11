@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "app_context.h"
 #include "app_hardware.h"
 
 /*
@@ -162,6 +163,7 @@ typedef struct {
 typedef struct {
     bool           active;
     bool           error;
+    bool           ref_low;
     AppLockState_t state;
 
     AppLockDacState_t       dac;
@@ -356,6 +358,11 @@ bool APPLOCK_HasError(void)
     return s_lock.error;
 }
 
+bool APPLOCK_HasRefLow(void)
+{
+    return s_lock.ref_low;
+}
+
 const AppLockRuntime_t *APPLOCK_GetResult(void)
 {
     return &s_lock_rt;
@@ -366,6 +373,15 @@ void APPLOCK_OnSample(const AppRtloopSample_t *sample)
     uint32_t r_q15;
 
     if (!s_lock.active || (sample == NULL)) {
+        return;
+    }
+
+    if (sample->iref < APP_REF_LOW_THRESHOLD) {
+        s_lock.ref_low = true;
+        s_lock.active = false;
+        s_lock.state = APPLOCK_STATE_IDLE;
+        s_lock_rt.stage = APP_LOCK_STAGE_FAULT;
+        APPRTLOOP_Stop();
         return;
     }
 

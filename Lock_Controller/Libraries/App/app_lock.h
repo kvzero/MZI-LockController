@@ -75,6 +75,11 @@ bool APPLOCK_StartHardLock(void);
 bool APPLOCK_HasError(void);
 
 /**
+ * @brief Check whether post-offset Iref fell below the shared threshold while lock owned the loop.
+ */
+bool APPLOCK_HasRefLow(void);
+
+/**
  * @brief Read the latest public lock state for UI/process decisions.
  */
 const AppLockRuntime_t *APPLOCK_GetResult(void);

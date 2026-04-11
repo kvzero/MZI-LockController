@@ -55,6 +55,11 @@ bool APPSCAN_IsDone(void);
 const AppScanResult_t *APPSCAN_GetResult(void);
 
 /**
+ * @brief Check whether the scan stopped because post-offset Iref fell below the shared threshold.
+ */
+bool APPSCAN_HasRefLow(void);
+
+/**
  * @brief Consume one post-offset sample pair from the shared realtime loop.
  *
  * @note Call this only from APPRTLOOP's realtime callback path.

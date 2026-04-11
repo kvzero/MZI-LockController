@@ -2,12 +2,14 @@
 
 #include <string.h>
 
+#include "app_context.h"
 #include "app_hardware.h"
 
 #define APPSCAN_MEDIAN_WINDOW  7U
 
 typedef struct {
     bool     active;
+    bool     ref_low;
 
     uint8_t  cycles_done;
     uint8_t  cycles_total;
@@ -93,6 +95,11 @@ bool APPSCAN_IsDone(void)
     return s_scan_rt.valid;
 }
 
+bool APPSCAN_HasRefLow(void)
+{
+    return s_scan.ref_low;
+}
+
 const AppScanResult_t *APPSCAN_GetResult(void)
 {
     return &s_scan_rt;
@@ -105,6 +112,13 @@ void APPSCAN_OnSample(const AppRtloopSample_t *sample)
     uint32_t r_med_q15;
 
     if (!s_scan.active || (sample == NULL)) {
+        return;
+    }
+
+    if (sample->iref < APP_REF_LOW_THRESHOLD) {
+        s_scan.ref_low = true;
+        s_scan.active = false;
+        APPRTLOOP_Stop();
         return;
     }
 

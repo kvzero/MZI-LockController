@@ -20,7 +20,11 @@ typedef enum {
     APP_FAULT_ADC,
     APP_FAULT_LOCK,
     APP_FAULT_CONTRAST,
+    APP_FAULT_LIGHT_HIGH,
+    APP_FAULT_REF_LOW,
 } FaultCode_t;
+
+#define APP_REF_LOW_THRESHOLD 100
 
 /**
  * @brief Front-end runtime shared by all app pages.

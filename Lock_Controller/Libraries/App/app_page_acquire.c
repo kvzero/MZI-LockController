@@ -13,6 +13,7 @@
 #define APPACQ_SCAN_CYCLES    3U
 #define APPACQ_SUMMARY_HOLD_MS 1000U
 #define APPACQ_CONTRAST_MIN_Q15 16384U
+#define APPACQ_OFFSET_LIGHT_HIGH_THRESHOLD  800U
 #define ST7735_GREEN_TITLE_BG ST7735_COLOR565(0, 165, 64)
 
 typedef enum {
@@ -72,11 +73,33 @@ static void APPACQ_Process(void)
     const AppLockRuntime_t *lock_result;
     const AppScanResult_t *scan_result;
 
+    if (((s_acquire.flow_stage == APPACQ_FLOW_SCAN_RUN) ||
+         (s_acquire.flow_stage == APPACQ_FLOW_SCAN_DONE)) &&
+        APPSCAN_HasRefLow()) {
+        APP_SetFault(APP_FAULT_REF_LOW);
+        return;
+    }
+
+    if (((s_acquire.flow_stage == APPACQ_FLOW_SOFTLOCK_RUN) ||
+         (s_acquire.flow_stage == APPACQ_FLOW_RESONANCE_RUN) ||
+         (s_acquire.flow_stage == APPACQ_FLOW_RESONANCE_DONE)) &&
+        APPLOCK_HasRefLow()) {
+        APPLOCK_Stop();
+        APP_SetFault(APP_FAULT_REF_LOW);
+        return;
+    }
+
     switch (s_acquire.flow_stage) {
         case APPACQ_FLOW_OFFSET_RUN:
             if (!APPACQ_ReadOffsetAverage(&s_acquire.offset.iout_offset_raw,
                                           &s_acquire.offset.iref_offset_raw)) {
                 APP_SetFault(APP_FAULT_ADC);
+                return;
+            }
+
+            if ((s_acquire.offset.iout_offset_raw > APPACQ_OFFSET_LIGHT_HIGH_THRESHOLD ) ||
+                (s_acquire.offset.iref_offset_raw > APPACQ_OFFSET_LIGHT_HIGH_THRESHOLD )) {
+                APP_SetFault(APP_FAULT_LIGHT_HIGH);
                 return;
             }
 

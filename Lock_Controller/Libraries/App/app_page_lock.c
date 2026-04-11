@@ -72,6 +72,12 @@ static void APPPAGELOCK_Process(void)
 {
     uint32_t now_ms;
 
+    if (APPLOCK_HasRefLow()) {
+        APPLOCK_Stop();
+        APP_SetFault(APP_FAULT_REF_LOW);
+        return;
+    }
+
     if (APPRTLOOP_HasError() || APPLOCK_HasError()) {
         APPLOCK_Stop();
         APP_SetFault(APP_FAULT_LOCK);
