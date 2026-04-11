@@ -1,6 +1,7 @@
 #include "app_page_wait.h"
 #include "app.h"
 #include "app_core.h"
+#include "app_hardware.h"
 #include "app_widgets.h"
 
 static void APPWAIT_Render(void);
@@ -13,9 +14,13 @@ const AppPageOps_t APP_PAGE_WAIT_OPS = {
 
 static void APPWAIT_Render(void)
 {
-    APPW_DrawFrame("Laser Check");
-    APPW_WriteBodyLine(28, "Turn off laser");
-    APPW_WriteBodyLine(44, "Short press any key");
+    if (g_hw->hlcd != NULL) {
+        ST7735_FillScreen(g_hw->hlcd, ST7735_BLACK);
+    }
+
+    APPW_DrawFrame("Laser Check", ST7735_BLACK, ST7735_WHITE);
+    APPW_WriteBodyLine(38, "Turn off the laser", ST7735_WHITE);
+    APPW_WriteBodyLine(54, "Short press any key", ST7735_WHITE);
 }
 
 static void APPWAIT_OnButton(Button_Event_t evt)

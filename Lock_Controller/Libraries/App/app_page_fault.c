@@ -1,6 +1,7 @@
 #include "app_page_fault.h"
 #include <stdio.h>
 #include "app_core.h"
+#include "app_hardware.h"
 #include "app_widgets.h"
 
 static void APPFAULT_Render(void);
@@ -14,11 +15,15 @@ static void APPFAULT_Render(void)
 {
     char line[32];
 
-    APPW_DrawFrame("Fault");
-    APPW_WriteBodyLine(28, APPFAULT_GetFaultText(g_rt.fault));
+    if (g_hw->hlcd != NULL) {
+        ST7735_FillScreen(g_hw->hlcd, ST7735_BLACK);
+    }
+
+    APPW_DrawFrame("Fault", ST7735_YELLOW, ST7735_RED);
+    APPW_WriteBodyLine(28, APPFAULT_GetFaultText(g_rt.fault), ST7735_YELLOW);
 
     (void)snprintf(line, sizeof(line), "Code: %u", (unsigned)g_rt.fault);
-    APPW_WriteBodyLine(46, line);
+    APPW_WriteBodyLine(46, line, ST7735_YELLOW);
 }
 
 static const char *APPFAULT_GetFaultText(FaultCode_t fault)

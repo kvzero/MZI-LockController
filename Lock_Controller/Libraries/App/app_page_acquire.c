@@ -13,6 +13,7 @@
 #define APPACQ_SCAN_CYCLES    3U
 #define APPACQ_SUMMARY_HOLD_MS 1000U
 #define APPACQ_CONTRAST_MIN_Q15 16384U
+#define ST7735_GREEN_TITLE_BG ST7735_COLOR565(0, 165, 64)
 
 typedef enum {
     APPACQ_FLOW_IDLE = 0,
@@ -21,9 +22,7 @@ typedef enum {
     APPACQ_FLOW_SCAN_PREP,
     APPACQ_FLOW_SCAN_RUN,
     APPACQ_FLOW_SCAN_DONE,
-    APPACQ_FLOW_SOFTLOCK_PREP,
     APPACQ_FLOW_SOFTLOCK_RUN,
-    APPACQ_FLOW_RESONANCE_PREP,
     APPACQ_FLOW_RESONANCE_RUN,
     APPACQ_FLOW_RESONANCE_DONE,
 } AppAcquireFlowStage_t;
@@ -112,30 +111,26 @@ static void APPACQ_Process(void)
 
         case APPACQ_FLOW_SCAN_DONE:
             if (APPACQ_FlowStageElapsed(APPACQ_SUMMARY_HOLD_MS)) {
-                APPACQ_GotoFlowStage(APPACQ_FLOW_SOFTLOCK_PREP);
-            }
-            break;
+                scan_result = APPSCAN_GetResult();
+                if ((scan_result == NULL) || !scan_result->valid) {
+                    APP_SetFault(APP_FAULT_LOCK);
+                    return;
+                }
 
-        case APPACQ_FLOW_SOFTLOCK_PREP:
-            scan_result = APPSCAN_GetResult();
-            if ((scan_result == NULL) || !scan_result->valid) {
-                APP_SetFault(APP_FAULT_LOCK);
-                return;
-            }
+                if (scan_result->contrast_q15 < APPACQ_CONTRAST_MIN_Q15) {
+                    APP_SetFault(APP_FAULT_CONTRAST);
+                    return;
+                }
 
-            if (scan_result->contrast_q15 < APPACQ_CONTRAST_MIN_Q15) {
-                APP_SetFault(APP_FAULT_CONTRAST);
-                return;
-            }
+                if (!APPLOCK_StartSoft(s_acquire.offset.iout_offset_raw,
+                                       s_acquire.offset.iref_offset_raw,
+                                       scan_result)) {
+                    APP_SetFault(APP_FAULT_LOCK);
+                    return;
+                }
 
-            if (!APPLOCK_StartSoft(s_acquire.offset.iout_offset_raw,
-                                   s_acquire.offset.iref_offset_raw,
-                                   scan_result)) {
-                APP_SetFault(APP_FAULT_LOCK);
-                return;
+                APPACQ_GotoFlowStage(APPACQ_FLOW_SOFTLOCK_RUN);
             }
-
-            APPACQ_GotoFlowStage(APPACQ_FLOW_SOFTLOCK_RUN);
             break;
 
         case APPACQ_FLOW_SOFTLOCK_RUN:
@@ -151,18 +146,15 @@ static void APPACQ_Process(void)
             }
 
             if (lock_result->stage == APP_LOCK_STAGE_SOFT) {
-                APPACQ_GotoFlowStage(APPACQ_FLOW_RESONANCE_PREP);
-            }
-            break;
+                if (!APPLOCK_StartResonanceSweep()) {
+                    APPLOCK_Stop();
+                    APP_SetFault(APP_FAULT_LOCK);
+                    return;
+                }
 
-        case APPACQ_FLOW_RESONANCE_PREP:
-            if (!APPLOCK_StartResonanceSweep()) {
-                APPLOCK_Stop();
-                APP_SetFault(APP_FAULT_LOCK);
-                return;
+                s_acquire.flow_stage = APPACQ_FLOW_RESONANCE_RUN;
+                s_flow_stage_enter_ms = HAL_GetTick();
             }
-
-            APPACQ_GotoFlowStage(APPACQ_FLOW_RESONANCE_RUN);
             break;
 
         case APPACQ_FLOW_RESONANCE_RUN:
@@ -203,94 +195,75 @@ static void APPACQ_Render(void)
     const AppLockRuntime_t *lock_result;
     const AppScanResult_t *scan_result;
 
+    if (g_hw->hlcd != NULL) {
+        ST7735_FillScreen(g_hw->hlcd, ST7735_BLACK);
+    }
+
     lock_result = APPLOCK_GetResult();
     scan_result = APPSCAN_GetResult();
 
     switch (s_acquire.flow_stage) {
         case APPACQ_FLOW_OFFSET_DONE:
-            APPW_DrawFrame("Offset Zero");
+            APPW_DrawFrame("Offset Zero", ST7735_WHITE, ST7735_GREEN_TITLE_BG);
 
-            (void)snprintf(line, sizeof(line), "Iout: %4u", (unsigned)s_acquire.offset.iout_offset_raw);
-            APPW_WriteBodyLine(22, line);
-
-            (void)snprintf(line, sizeof(line), "Iref: %4u", (unsigned)s_acquire.offset.iref_offset_raw);
-            APPW_WriteBodyLine(36, line);
-            APPW_WriteBodyLine(54, "Turn laser on");
-            APPW_WriteBodyLine(68, "Short press scan");
-            break;
-
-        case APPACQ_FLOW_SCAN_DONE:
-            APPW_DrawFrame("Scan Result");
-            contrast_permille = 0U;
-            if ((scan_result != NULL) && scan_result->valid) {
-                contrast_permille = ((uint32_t)scan_result->contrast_q15 * 1000U + 16384U) >> 15;
-            }
-
-            (void)snprintf(line, sizeof(line), "Ctr:%3u.%1u%% %u/%u",
-                           (unsigned)(contrast_permille / 10U),
-                           (unsigned)(contrast_permille % 10U),
-                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_done : 0U),
-                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_total : 0U));
-            APPW_WriteBodyLine(18, line);
-
-            (void)snprintf(line, sizeof(line), "Rmax: %lu",
-                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_max_q15 : 0UL));
-            APPW_WriteBodyLine(32, line);
-
-            (void)snprintf(line, sizeof(line), "Rmin: %lu",
-                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_min_q15 : 0UL));
-            APPW_WriteBodyLine(46, line);
-
-            (void)snprintf(line, sizeof(line), "Rtgt: %lu",
-                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_target_q15 : 0UL));
-            APPW_WriteBodyLine(60, line);
-            APPW_WriteBodyLine(74, "Auto locking...");
+            (void)snprintf(line, sizeof(line), "Iout:%4u Iref:%4u",
+                           (unsigned)s_acquire.offset.iout_offset_raw,
+                           (unsigned)s_acquire.offset.iref_offset_raw);
+            APPW_WriteBodyLine(34, line, ST7735_YELLOW);
+            APPW_WriteBodyLine(50, "Turn laser on", ST7735_WHITE);
+            APPW_WriteBodyLine(64, "Short press to scan", ST7735_WHITE);
             break;
 
         case APPACQ_FLOW_OFFSET_RUN:
         case APPACQ_FLOW_IDLE:
         default:
-            APPW_DrawFrame("Offset Zero");
-            APPW_WriteBodyLine(28, "Sampling PD offsets");
-            APPW_WriteBodyLine(44, "Please wait...");
+            APPW_DrawFrame("Offset Zero", ST7735_BLACK, ST7735_WHITE);
+            APPW_WriteBodyLine(38, "Sampling PD offsets", ST7735_WHITE);
+            APPW_WriteBodyLine(54, "Please wait...", ST7735_WHITE);
             break;
 
         case APPACQ_FLOW_SCAN_PREP:
         case APPACQ_FLOW_SCAN_RUN:
-            APPW_DrawFrame("Fringe Scan");
+            APPW_DrawFrame("Fringe Scan", ST7735_BLACK, ST7735_WHITE);
 
-            (void)snprintf(line, sizeof(line), "Cycles: %u/%u",
-                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_done : 0U),
+            (void)snprintf(line, sizeof(line), "Cycles: %u",
                            (unsigned)(((scan_result != NULL) && (scan_result->cycles_total != 0U)) ? scan_result->cycles_total : APPACQ_SCAN_CYCLES));
-            APPW_WriteBodyLine(24, line);
-            APPW_WriteBodyLine(42, "Laser on, scanning");
-            APPW_WriteBodyLine(56, "Please wait...");
+            APPW_WriteBodyLine(34, line, ST7735_WHITE);
+            APPW_WriteBodyLine(49, "Laser on, scanning", ST7735_WHITE);
+            APPW_WriteBodyLine(64, "Please wait...", ST7735_WHITE);
             break;
 
-        case APPACQ_FLOW_SOFTLOCK_PREP:
+        case APPACQ_FLOW_SCAN_DONE:
+            APPW_DrawFrame("Scan Result", ST7735_WHITE, ST7735_GREEN_TITLE_BG);
+            contrast_permille = 0U;
+            if ((scan_result != NULL) && scan_result->valid) {
+                contrast_permille = ((uint32_t)scan_result->contrast_q15 * 1000U + 16384U) >> 15;
+            }
+
+            (void)snprintf(line, sizeof(line), "Ctr:%3u.%1u%%",
+                           (unsigned)(contrast_permille / 10U),
+                           (unsigned)(contrast_permille % 10U));
+            APPW_WriteBodyLine(34, line, ST7735_YELLOW);
+            APPW_WriteBodyLine(49, "Lock point found", ST7735_WHITE);
+            APPW_WriteBodyLine(64, "Preparing soft lock", ST7735_WHITE);
+            break;
+
         case APPACQ_FLOW_SOFTLOCK_RUN:
-            APPW_DrawFrame("Resonance Scan");
-            APPW_WriteBodyLine(24, "Preparing soft lock");
-            APPW_WriteBodyLine(42, "Low bandwidth PI");
-            APPW_WriteBodyLine(56, "Please wait...");
-            break;
-
-        case APPACQ_FLOW_RESONANCE_PREP:
         case APPACQ_FLOW_RESONANCE_RUN:
-            APPW_DrawFrame("Resonance Scan");
-            APPW_WriteBodyLine(24, "Sweeping...");
-            APPW_WriteBodyLine(42, "Soft lock hold");
-            APPW_WriteBodyLine(56, "IQ measuring...");
+            APPW_DrawFrame("Resonance Scan", ST7735_BLACK, ST7735_WHITE);
+            APPW_WriteBodyLine(34, "Sweeping...", ST7735_WHITE);
+            APPW_WriteBodyLine(49, "Soft lock hold", ST7735_WHITE);
+            APPW_WriteBodyLine(64, "IQ measuring...", ST7735_WHITE);
             break;
 
         case APPACQ_FLOW_RESONANCE_DONE:
-            APPW_DrawFrame("Resonance");
+            APPW_DrawFrame("Resonance", ST7735_WHITE, ST7735_GREEN_TITLE_BG);
             (void)snprintf(line, sizeof(line), "Fn: %lu.%1lu kHz",
                            (unsigned long)(((lock_result != NULL) ? lock_result->fn_hz : 0UL) / 1000UL),
                            (unsigned long)((((lock_result != NULL) ? lock_result->fn_hz : 0UL) % 1000UL) / 100UL));
-            APPW_WriteBodyLine(24, line);
-            APPW_WriteBodyLine(42, "Q : --");
-            APPW_WriteBodyLine(58, "Entering lock...");
+            APPW_WriteBodyLine(34, line, ST7735_YELLOW);
+            APPW_WriteBodyLine(49, "Q : --", ST7735_WHITE);
+            APPW_WriteBodyLine(64, "Entering lock...", ST7735_WHITE);
             break;
 
     }
