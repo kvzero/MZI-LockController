@@ -4,8 +4,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "app_context.h"
 #include "app_rtloop.h"
+
+typedef struct {
+    uint8_t  cycles_done;
+    uint8_t  cycles_total;
+    uint16_t contrast_q15;
+    uint32_t r_max_q15;
+    uint32_t r_min_q15;
+    uint32_t r_target_q15;
+    bool     valid;
+} AppScanResult_t;
 
 /**
  * @brief Reset all scan state back to idle and clear the last result.

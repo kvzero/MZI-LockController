@@ -1,3 +1,4 @@
+#include "app_page_wait.h"
 #include "app.h"
 #include "app_core.h"
 #include "app_widgets.h"

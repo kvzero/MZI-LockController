@@ -2,7 +2,6 @@
 #define APP_CONTEXT_H
 
 #include <stdbool.h>
-#include <stdint.h>
 
 /**
  * @brief Top-level pages. Each page owns its own process, render, and button handlers.
@@ -24,72 +23,12 @@ typedef enum {
 } FaultCode_t;
 
 /**
- * @brief Acquire-page internal steps.
- *
- * Only the acquire page uses this state machine. Top-level page switching is handled by AppPage_t.
- */
-typedef enum {
-    ACQ_STEP_IDLE = 0,
-    ACQ_STEP_OFFSET_PREP,
-    ACQ_STEP_OFFSET_RUN,
-    ACQ_STEP_OFFSET_DONE,
-    ACQ_STEP_SCAN_PREP,
-    ACQ_STEP_SCAN_RUN,
-    ACQ_STEP_SCAN_DONE,
-    ACQ_STEP_SOFTLOCK_PREP,
-    ACQ_STEP_SOFTLOCK_RUN,
-    ACQ_STEP_RESONANCE_PREP,
-    ACQ_STEP_RESONANCE_RUN,
-    ACQ_STEP_RESONANCE_DONE,
-} AcquireStep_t;
-
-typedef struct {
-    uint16_t iout_offset_raw;
-    uint16_t iref_offset_raw;
-    bool     valid;
-} AppOffsetResult_t;
-
-typedef struct {
-    uint8_t  cycles_done;
-    uint8_t  cycles_total;
-    uint16_t contrast_q15;
-    uint32_t r_max_q15;
-    uint32_t r_min_q15;
-    uint32_t r_target_q15;
-    bool     valid;
-} AppScanResult_t;
-
-typedef struct {
-    AcquireStep_t     step;
-    AppOffsetResult_t offset;
-    AppScanResult_t   scan;
-} AppAcquireRuntime_t;
-
-typedef struct {
-    bool     active;
-    bool     soft_locked;
-    bool     hard_locked;
-    bool     resonance_done;
-    bool     error;
-    int8_t   polarity;
-    uint32_t r_target_q15;
-    uint32_t r_now_q15;
-    int32_t  error_q15;
-    uint16_t capture_raw;
-    uint16_t output_raw;
-    uint32_t resonance_freq_hz;
-    uint32_t fn_hz;
-} AppLockRuntime_t;
-
-/**
  * @brief Front-end runtime shared by all app pages.
  */
 typedef struct {
-    AppPage_t          page;
-    FaultCode_t        fault;
-    bool               ui_dirty;
-    AppAcquireRuntime_t acquire;
-    AppLockRuntime_t    lock;
+    AppPage_t   page;
+    FaultCode_t fault;
+    bool        ui_dirty;
 } AppRuntime_t;
 
 extern AppRuntime_t g_rt;

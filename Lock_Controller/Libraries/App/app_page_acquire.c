@@ -1,3 +1,4 @@
+#include "app_page_acquire.h"
 #include <stdio.h>
 #include "stm32g4xx_hal.h"
 #include "app.h"
@@ -13,16 +14,42 @@
 #define APPACQ_SUMMARY_HOLD_MS 1000U
 #define APPACQ_CONTRAST_MIN_Q15 16384U
 
+typedef enum {
+    APPACQ_FLOW_IDLE = 0,
+    APPACQ_FLOW_OFFSET_RUN,
+    APPACQ_FLOW_OFFSET_DONE,
+    APPACQ_FLOW_SCAN_PREP,
+    APPACQ_FLOW_SCAN_RUN,
+    APPACQ_FLOW_SCAN_DONE,
+    APPACQ_FLOW_SOFTLOCK_PREP,
+    APPACQ_FLOW_SOFTLOCK_RUN,
+    APPACQ_FLOW_RESONANCE_PREP,
+    APPACQ_FLOW_RESONANCE_RUN,
+    APPACQ_FLOW_RESONANCE_DONE,
+} AppAcquireFlowStage_t;
+
+typedef struct {
+    uint16_t iout_offset_raw;
+    uint16_t iref_offset_raw;
+    bool     valid;
+} AppOffsetResult_t;
+
+typedef struct {
+    AppAcquireFlowStage_t flow_stage;
+    AppOffsetResult_t     offset;
+} AppAcquireState_t;
+
 static void APPACQ_Enter(void);
 static void APPACQ_Process(void);
 static void APPACQ_Render(void);
 static void APPACQ_OnButton(Button_Event_t evt);
 
-static void APPACQ_GotoStep(AcquireStep_t step);
-static bool APPACQ_StepElapsed(uint32_t elapsed_ms);
+static void APPACQ_GotoFlowStage(AppAcquireFlowStage_t flow_stage);
+static bool APPACQ_FlowStageElapsed(uint32_t elapsed_ms);
 static bool APPACQ_ReadOffsetAverage(uint16_t *iout, uint16_t *iref);
 
-static uint32_t s_step_enter_ms;
+static AppAcquireState_t s_acquire;
+static uint32_t s_flow_stage_enter_ms;
 
 const AppPageOps_t APP_PAGE_ACQUIRE_OPS = {
     .enter = APPACQ_Enter,
@@ -35,76 +62,41 @@ static void APPACQ_Enter(void)
 {
     APPLOCK_Reset();
     APPSCAN_Reset();
-    g_rt.acquire.offset.iout_offset_raw = 0U;
-    g_rt.acquire.offset.iref_offset_raw = 0U;
-    g_rt.acquire.offset.valid = false;
-    g_rt.acquire.scan.cycles_done = 0U;
-    g_rt.acquire.scan.cycles_total = 0U;
-    g_rt.acquire.scan.contrast_q15 = 0U;
-    g_rt.acquire.scan.r_max_q15 = 0U;
-    g_rt.acquire.scan.r_min_q15 = 0U;
-    g_rt.acquire.scan.r_target_q15 = 0U;
-    g_rt.acquire.scan.valid = false;
-    g_rt.lock.active = false;
-    g_rt.lock.soft_locked = false;
-    g_rt.lock.hard_locked = false;
-    g_rt.lock.resonance_done = false;
-    g_rt.lock.error = false;
-    g_rt.lock.polarity = 0;
-    g_rt.lock.r_target_q15 = 0U;
-    g_rt.lock.r_now_q15 = 0U;
-    g_rt.lock.error_q15 = 0;
-    g_rt.lock.capture_raw = 0U;
-    g_rt.lock.output_raw = 0U;
-    g_rt.lock.resonance_freq_hz = 0UL;
-    g_rt.lock.fn_hz = 0UL;
-    APPACQ_GotoStep(ACQ_STEP_OFFSET_PREP);
+    s_acquire = (AppAcquireState_t){
+        .flow_stage = APPACQ_FLOW_IDLE,
+    };
+    APPACQ_GotoFlowStage(APPACQ_FLOW_OFFSET_RUN);
 }
 
 static void APPACQ_Process(void)
 {
     const AppLockRuntime_t *lock_result;
     const AppScanResult_t *scan_result;
-    uint16_t iout;
-    uint16_t iref;
 
-    switch (g_rt.acquire.step) {
-        case ACQ_STEP_OFFSET_PREP:
-            APPACQ_GotoStep(ACQ_STEP_OFFSET_RUN);
-            break;
-
-        case ACQ_STEP_OFFSET_RUN:
-            if (!APPACQ_ReadOffsetAverage(&iout, &iref)) {
+    switch (s_acquire.flow_stage) {
+        case APPACQ_FLOW_OFFSET_RUN:
+            if (!APPACQ_ReadOffsetAverage(&s_acquire.offset.iout_offset_raw,
+                                          &s_acquire.offset.iref_offset_raw)) {
                 APP_SetFault(APP_FAULT_ADC);
                 return;
             }
 
-            g_rt.acquire.offset.iout_offset_raw = iout;
-            g_rt.acquire.offset.iref_offset_raw = iref;
-            g_rt.acquire.offset.valid = true;
-            APPACQ_GotoStep(ACQ_STEP_OFFSET_DONE);
+            s_acquire.offset.valid = true;
+            APPACQ_GotoFlowStage(APPACQ_FLOW_OFFSET_DONE);
             break;
 
-        case ACQ_STEP_SCAN_PREP:
-            g_rt.acquire.scan.cycles_done = 0U;
-            g_rt.acquire.scan.cycles_total = APPACQ_SCAN_CYCLES;
-            g_rt.acquire.scan.contrast_q15 = 0U;
-            g_rt.acquire.scan.r_max_q15 = 0U;
-            g_rt.acquire.scan.r_min_q15 = 0U;
-            g_rt.acquire.scan.r_target_q15 = 0U;
-            g_rt.acquire.scan.valid = false;
-
+        case APPACQ_FLOW_SCAN_PREP:
             if (!APPSCAN_Start(APPACQ_SCAN_CYCLES,
-                               g_rt.acquire.offset.iout_offset_raw,
-                               g_rt.acquire.offset.iref_offset_raw)) {
+                               s_acquire.offset.iout_offset_raw,
+                               s_acquire.offset.iref_offset_raw)) {
                 APP_SetFault(APP_FAULT_ADC);
                 return;
             }
 
-            APPACQ_GotoStep(ACQ_STEP_SCAN_RUN);
+            APPACQ_GotoFlowStage(APPACQ_FLOW_SCAN_RUN);
             break;
 
-        case ACQ_STEP_SCAN_RUN:
+        case APPACQ_FLOW_SCAN_RUN:
             if (APPRTLOOP_HasError()) {
                 APP_SetFault(APP_FAULT_ADC);
                 return;
@@ -115,47 +107,38 @@ static void APPACQ_Process(void)
                 break;
             }
 
-            g_rt.acquire.scan = *scan_result;
-            APPACQ_GotoStep(ACQ_STEP_SCAN_DONE);
+            APPACQ_GotoFlowStage(APPACQ_FLOW_SCAN_DONE);
             break;
 
-        case ACQ_STEP_SCAN_DONE:
-            if (APPACQ_StepElapsed(APPACQ_SUMMARY_HOLD_MS)) {
-                APPACQ_GotoStep(ACQ_STEP_SOFTLOCK_PREP);
+        case APPACQ_FLOW_SCAN_DONE:
+            if (APPACQ_FlowStageElapsed(APPACQ_SUMMARY_HOLD_MS)) {
+                APPACQ_GotoFlowStage(APPACQ_FLOW_SOFTLOCK_PREP);
             }
             break;
 
-        case ACQ_STEP_SOFTLOCK_PREP:
-            g_rt.lock.active = false;
-            g_rt.lock.soft_locked = false;
-            g_rt.lock.hard_locked = false;
-            g_rt.lock.resonance_done = false;
-            g_rt.lock.error = false;
-            g_rt.lock.polarity = 0;
-            g_rt.lock.r_target_q15 = g_rt.acquire.scan.r_target_q15;
-            g_rt.lock.r_now_q15 = 0U;
-            g_rt.lock.error_q15 = 0;
-            g_rt.lock.capture_raw = 0U;
-            g_rt.lock.output_raw = APPRTLOOP_GetLastRaw();
-            g_rt.lock.resonance_freq_hz = 0UL;
-            g_rt.lock.fn_hz = 0UL;
-
-            if (g_rt.acquire.scan.contrast_q15 < APPACQ_CONTRAST_MIN_Q15) {
-                APP_SetFault(APP_FAULT_CONTRAST);
-                return;
-            }
-
-            if (!APPLOCK_StartSoft(g_rt.acquire.offset.iout_offset_raw,
-                                   g_rt.acquire.offset.iref_offset_raw,
-                                   &g_rt.acquire.scan)) {
+        case APPACQ_FLOW_SOFTLOCK_PREP:
+            scan_result = APPSCAN_GetResult();
+            if ((scan_result == NULL) || !scan_result->valid) {
                 APP_SetFault(APP_FAULT_LOCK);
                 return;
             }
 
-            APPACQ_GotoStep(ACQ_STEP_SOFTLOCK_RUN);
+            if (scan_result->contrast_q15 < APPACQ_CONTRAST_MIN_Q15) {
+                APP_SetFault(APP_FAULT_CONTRAST);
+                return;
+            }
+
+            if (!APPLOCK_StartSoft(s_acquire.offset.iout_offset_raw,
+                                   s_acquire.offset.iref_offset_raw,
+                                   scan_result)) {
+                APP_SetFault(APP_FAULT_LOCK);
+                return;
+            }
+
+            APPACQ_GotoFlowStage(APPACQ_FLOW_SOFTLOCK_RUN);
             break;
 
-        case ACQ_STEP_SOFTLOCK_RUN:
+        case APPACQ_FLOW_SOFTLOCK_RUN:
             if (APPRTLOOP_HasError() || APPLOCK_HasError()) {
                 APPLOCK_Stop();
                 APP_SetFault(APP_FAULT_LOCK);
@@ -167,24 +150,22 @@ static void APPACQ_Process(void)
                 break;
             }
 
-            g_rt.lock = *lock_result;
-
-            if (g_rt.lock.soft_locked) {
-                APPACQ_GotoStep(ACQ_STEP_RESONANCE_PREP);
+            if (lock_result->stage == APP_LOCK_STAGE_SOFT) {
+                APPACQ_GotoFlowStage(APPACQ_FLOW_RESONANCE_PREP);
             }
             break;
 
-        case ACQ_STEP_RESONANCE_PREP:
+        case APPACQ_FLOW_RESONANCE_PREP:
             if (!APPLOCK_StartResonanceSweep()) {
                 APPLOCK_Stop();
                 APP_SetFault(APP_FAULT_LOCK);
                 return;
             }
 
-            APPACQ_GotoStep(ACQ_STEP_RESONANCE_RUN);
+            APPACQ_GotoFlowStage(APPACQ_FLOW_RESONANCE_RUN);
             break;
 
-        case ACQ_STEP_RESONANCE_RUN:
+        case APPACQ_FLOW_RESONANCE_RUN:
             if (APPRTLOOP_HasError() || APPLOCK_HasError()) {
                 APPLOCK_Stop();
                 APP_SetFault(APP_FAULT_LOCK);
@@ -196,20 +177,20 @@ static void APPACQ_Process(void)
                 break;
             }
 
-            g_rt.lock = *lock_result;
-            if (g_rt.lock.resonance_done) {
-                APPACQ_GotoStep(ACQ_STEP_RESONANCE_DONE);
+            if ((lock_result->stage == APP_LOCK_STAGE_SOFT) &&
+                (lock_result->fn_hz != 0UL)) {
+                APPACQ_GotoFlowStage(APPACQ_FLOW_RESONANCE_DONE);
             }
             break;
 
-        case ACQ_STEP_RESONANCE_DONE:
-            if (APPACQ_StepElapsed(APPACQ_SUMMARY_HOLD_MS)) {
+        case APPACQ_FLOW_RESONANCE_DONE:
+            if (APPACQ_FlowStageElapsed(APPACQ_SUMMARY_HOLD_MS)) {
                 APP_GotoPage(APP_PAGE_LOCK);
             }
             break;
 
-        case ACQ_STEP_OFFSET_DONE:
-        case ACQ_STEP_IDLE:
+        case APPACQ_FLOW_OFFSET_DONE:
+        case APPACQ_FLOW_IDLE:
         default:
             break;
     }
@@ -219,84 +200,94 @@ static void APPACQ_Render(void)
 {
     char line[32];
     uint32_t contrast_permille;
+    const AppLockRuntime_t *lock_result;
+    const AppScanResult_t *scan_result;
 
-    switch (g_rt.acquire.step) {
-        case ACQ_STEP_OFFSET_DONE:
+    lock_result = APPLOCK_GetResult();
+    scan_result = APPSCAN_GetResult();
+
+    switch (s_acquire.flow_stage) {
+        case APPACQ_FLOW_OFFSET_DONE:
             APPW_DrawFrame("Offset Zero");
 
-            (void)snprintf(line, sizeof(line), "Iout: %4u", (unsigned)g_rt.acquire.offset.iout_offset_raw);
+            (void)snprintf(line, sizeof(line), "Iout: %4u", (unsigned)s_acquire.offset.iout_offset_raw);
             APPW_WriteBodyLine(22, line);
 
-            (void)snprintf(line, sizeof(line), "Iref: %4u", (unsigned)g_rt.acquire.offset.iref_offset_raw);
+            (void)snprintf(line, sizeof(line), "Iref: %4u", (unsigned)s_acquire.offset.iref_offset_raw);
             APPW_WriteBodyLine(36, line);
             APPW_WriteBodyLine(54, "Turn laser on");
             APPW_WriteBodyLine(68, "Short press scan");
             break;
 
-        case ACQ_STEP_SCAN_DONE:
+        case APPACQ_FLOW_SCAN_DONE:
             APPW_DrawFrame("Scan Result");
-            contrast_permille = ((uint32_t)g_rt.acquire.scan.contrast_q15 * 1000U + 16384U) >> 15;
+            contrast_permille = 0U;
+            if ((scan_result != NULL) && scan_result->valid) {
+                contrast_permille = ((uint32_t)scan_result->contrast_q15 * 1000U + 16384U) >> 15;
+            }
 
             (void)snprintf(line, sizeof(line), "Ctr:%3u.%1u%% %u/%u",
                            (unsigned)(contrast_permille / 10U),
                            (unsigned)(contrast_permille % 10U),
-                           (unsigned)g_rt.acquire.scan.cycles_done,
-                           (unsigned)g_rt.acquire.scan.cycles_total);
+                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_done : 0U),
+                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_total : 0U));
             APPW_WriteBodyLine(18, line);
 
-            (void)snprintf(line, sizeof(line), "Rmax: %lu", (unsigned long)g_rt.acquire.scan.r_max_q15);
+            (void)snprintf(line, sizeof(line), "Rmax: %lu",
+                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_max_q15 : 0UL));
             APPW_WriteBodyLine(32, line);
 
-            (void)snprintf(line, sizeof(line), "Rmin: %lu", (unsigned long)g_rt.acquire.scan.r_min_q15);
+            (void)snprintf(line, sizeof(line), "Rmin: %lu",
+                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_min_q15 : 0UL));
             APPW_WriteBodyLine(46, line);
 
-            (void)snprintf(line, sizeof(line), "Rtgt: %lu", (unsigned long)g_rt.acquire.scan.r_target_q15);
+            (void)snprintf(line, sizeof(line), "Rtgt: %lu",
+                           (unsigned long)(((scan_result != NULL) && scan_result->valid) ? scan_result->r_target_q15 : 0UL));
             APPW_WriteBodyLine(60, line);
             APPW_WriteBodyLine(74, "Auto locking...");
             break;
 
-        case ACQ_STEP_OFFSET_PREP:
-        case ACQ_STEP_OFFSET_RUN:
-        case ACQ_STEP_IDLE:
+        case APPACQ_FLOW_OFFSET_RUN:
+        case APPACQ_FLOW_IDLE:
         default:
             APPW_DrawFrame("Offset Zero");
             APPW_WriteBodyLine(28, "Sampling PD offsets");
             APPW_WriteBodyLine(44, "Please wait...");
             break;
 
-        case ACQ_STEP_SCAN_PREP:
-        case ACQ_STEP_SCAN_RUN:
+        case APPACQ_FLOW_SCAN_PREP:
+        case APPACQ_FLOW_SCAN_RUN:
             APPW_DrawFrame("Fringe Scan");
 
             (void)snprintf(line, sizeof(line), "Cycles: %u/%u",
-                           (unsigned)g_rt.acquire.scan.cycles_done,
-                           (unsigned)g_rt.acquire.scan.cycles_total);
+                           (unsigned)(((scan_result != NULL) && scan_result->valid) ? scan_result->cycles_done : 0U),
+                           (unsigned)(((scan_result != NULL) && (scan_result->cycles_total != 0U)) ? scan_result->cycles_total : APPACQ_SCAN_CYCLES));
             APPW_WriteBodyLine(24, line);
             APPW_WriteBodyLine(42, "Laser on, scanning");
             APPW_WriteBodyLine(56, "Please wait...");
             break;
 
-        case ACQ_STEP_SOFTLOCK_PREP:
-        case ACQ_STEP_SOFTLOCK_RUN:
+        case APPACQ_FLOW_SOFTLOCK_PREP:
+        case APPACQ_FLOW_SOFTLOCK_RUN:
             APPW_DrawFrame("Resonance Scan");
             APPW_WriteBodyLine(24, "Preparing soft lock");
             APPW_WriteBodyLine(42, "Low bandwidth PI");
             APPW_WriteBodyLine(56, "Please wait...");
             break;
 
-        case ACQ_STEP_RESONANCE_PREP:
-        case ACQ_STEP_RESONANCE_RUN:
+        case APPACQ_FLOW_RESONANCE_PREP:
+        case APPACQ_FLOW_RESONANCE_RUN:
             APPW_DrawFrame("Resonance Scan");
             APPW_WriteBodyLine(24, "Sweeping...");
             APPW_WriteBodyLine(42, "Soft lock hold");
             APPW_WriteBodyLine(56, "IQ measuring...");
             break;
 
-        case ACQ_STEP_RESONANCE_DONE:
+        case APPACQ_FLOW_RESONANCE_DONE:
             APPW_DrawFrame("Resonance");
             (void)snprintf(line, sizeof(line), "Fn: %lu.%1lu kHz",
-                           (unsigned long)(g_rt.lock.fn_hz / 1000UL),
-                           (unsigned long)((g_rt.lock.fn_hz % 1000UL) / 100UL));
+                           (unsigned long)(((lock_result != NULL) ? lock_result->fn_hz : 0UL) / 1000UL),
+                           (unsigned long)((((lock_result != NULL) ? lock_result->fn_hz : 0UL) % 1000UL) / 100UL));
             APPW_WriteBodyLine(24, line);
             APPW_WriteBodyLine(42, "Q : --");
             APPW_WriteBodyLine(58, "Entering lock...");
@@ -311,23 +302,23 @@ static void APPACQ_OnButton(Button_Event_t evt)
         return;
     }
 
-    if (g_rt.acquire.step != ACQ_STEP_OFFSET_DONE) {
+    if (s_acquire.flow_stage != APPACQ_FLOW_OFFSET_DONE) {
         return;
     }
 
-    APPACQ_GotoStep(ACQ_STEP_SCAN_PREP);
+    APPACQ_GotoFlowStage(APPACQ_FLOW_SCAN_PREP);
 }
 
-static void APPACQ_GotoStep(AcquireStep_t step)
+static void APPACQ_GotoFlowStage(AppAcquireFlowStage_t flow_stage)
 {
-    g_rt.acquire.step = step;
-    s_step_enter_ms = HAL_GetTick();
+    s_acquire.flow_stage = flow_stage;
+    s_flow_stage_enter_ms = HAL_GetTick();
     APP_RequestRender();
 }
 
-static bool APPACQ_StepElapsed(uint32_t elapsed_ms)
+static bool APPACQ_FlowStageElapsed(uint32_t elapsed_ms)
 {
-    return ((uint32_t)(HAL_GetTick() - s_step_enter_ms) >= elapsed_ms);
+    return ((uint32_t)(HAL_GetTick() - s_flow_stage_enter_ms) >= elapsed_ms);
 }
 
 static bool APPACQ_ReadOffsetAverage(uint16_t *iout, uint16_t *iref)

@@ -1,3 +1,4 @@
+#include "app_page_lock.h"
 #include <stdio.h>
 #include "stm32g4xx_hal.h"
 #include "app.h"
@@ -23,18 +24,10 @@ const AppPageOps_t APP_PAGE_LOCK_OPS = {
 
 static void APPPAGELOCK_Enter(void)
 {
-    const AppLockRuntime_t *lock_result;
-
     if (!APPLOCK_StartHardLock()) {
         APP_SetFault(APP_FAULT_LOCK);
         return;
     }
-
-    lock_result = APPLOCK_GetResult();
-    if (lock_result != NULL) {
-        g_rt.lock = *lock_result;
-    }
-    g_rt.lock.output_raw = APPRTLOOP_GetLastRaw();
 
     s_last_render_ms = HAL_GetTick();
     APP_RequestRender();
@@ -42,7 +35,6 @@ static void APPPAGELOCK_Enter(void)
 
 static void APPPAGELOCK_Process(void)
 {
-    const AppLockRuntime_t *lock_result;
     uint32_t now_ms;
 
     if (APPRTLOOP_HasError() || APPLOCK_HasError()) {
@@ -50,13 +42,6 @@ static void APPPAGELOCK_Process(void)
         APP_SetFault(APP_FAULT_LOCK);
         return;
     }
-
-    lock_result = APPLOCK_GetResult();
-    if (lock_result != NULL) {
-        g_rt.lock = *lock_result;
-    }
-
-    g_rt.lock.output_raw = APPRTLOOP_GetLastRaw();
 
     now_ms = HAL_GetTick();
     if ((uint32_t)(now_ms - s_last_render_ms) >= APPLOCK_PAGE_REFRESH_MS) {
@@ -68,22 +53,27 @@ static void APPPAGELOCK_Process(void)
 static void APPPAGELOCK_Render(void)
 {
     char line[32];
+    const char *status;
+    const AppLockRuntime_t *lock_result;
     uint32_t out_mv;
+    uint16_t output_raw;
     uint32_t max_mv;
     uint16_t max_raw;
 
     APPW_DrawFrame("Lock");
+    lock_result = APPLOCK_GetResult();
+    output_raw = APPRTLOOP_GetLastRaw();
 
     (void)snprintf(line, sizeof(line), "Fn: %lu.%1lu kHz",
-                   (unsigned long)(g_rt.lock.fn_hz / 1000UL),
-                   (unsigned long)((g_rt.lock.fn_hz % 1000UL) / 100UL));
+                   (unsigned long)(((lock_result != NULL) ? lock_result->fn_hz : 0UL) / 1000UL),
+                   (unsigned long)((((lock_result != NULL) ? lock_result->fn_hz : 0UL) % 1000UL) / 100UL));
     APPW_WriteBodyLine(22, line);
 
     out_mv = 0UL;
     if ((g_hw->hvdac != NULL) && (g_hw->hvdac->max_raw != 0U)) {
         max_raw = g_hw->hvdac->max_raw;
         max_mv = (uint32_t)(g_hw->hvdac->max_voltage * 1000.0f + 0.5f);
-        out_mv = (uint32_t)(((uint64_t)g_rt.lock.output_raw * max_mv + (max_raw / 2U)) / max_raw);
+        out_mv = (uint32_t)(((uint64_t)output_raw * max_mv + (max_raw / 2U)) / max_raw);
     }
 
     (void)snprintf(line, sizeof(line), "Out:%3lu.%03lu V",
@@ -91,5 +81,17 @@ static void APPPAGELOCK_Render(void)
                    (unsigned long)(out_mv % 1000UL));
     APPW_WriteBodyLine(40, line);
 
-    APPW_WriteBodyLine(58, g_rt.lock.hard_locked ? "Status: Hard lock" : "Status: Soft hold");
+    status = "Status: Idle";
+    if ((lock_result != NULL) && (lock_result->stage == APP_LOCK_STAGE_HARD)) {
+        status = "Status: Hard lock";
+    } else if ((lock_result != NULL) &&
+               ((lock_result->stage == APP_LOCK_STAGE_SOFT) ||
+                (lock_result->stage == APP_LOCK_STAGE_CAPTURE) ||
+                (lock_result->stage == APP_LOCK_STAGE_RESONANCE))) {
+        status = "Status: Soft hold";
+    } else if ((lock_result != NULL) && (lock_result->stage == APP_LOCK_STAGE_FAULT)) {
+        status = "Status: Fault";
+    }
+
+    APPW_WriteBodyLine(58, status);
 }

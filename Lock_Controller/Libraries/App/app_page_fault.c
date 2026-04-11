@@ -1,3 +1,4 @@
+#include "app_page_fault.h"
 #include <stdio.h>
 #include "app_core.h"
 #include "app_widgets.h"

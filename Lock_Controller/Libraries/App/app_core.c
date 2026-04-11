@@ -1,6 +1,10 @@
 #include <string.h>
 #include "app.h"
 #include "app_core.h"
+#include "app_page_wait.h"
+#include "app_page_acquire.h"
+#include "app_page_lock.h"
+#include "app_page_fault.h"
 
 AppRuntime_t g_rt;
 

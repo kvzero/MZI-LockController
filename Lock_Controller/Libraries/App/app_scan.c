@@ -1,12 +1,13 @@
 #include "app_scan.h"
 
+#include <string.h>
+
 #include "app_hardware.h"
 
 #define APPSCAN_MEDIAN_WINDOW  7U
 
 typedef struct {
     bool     active;
-    bool     done;
 
     uint8_t  cycles_done;
     uint8_t  cycles_total;
@@ -22,11 +23,12 @@ typedef struct {
 
     uint32_t r_max_q15;
     uint32_t r_min_q15;
-
-    AppScanResult_t result;
 } AppScanState_t;
 
+/* Private scan engine state used only while the sweep is running. */
 static AppScanState_t s_scan;
+/* Public scan summary exported through APPSCAN_GetResult(). */
+static AppScanResult_t s_scan_rt;
 
 static void APPSCAN_ClearState(void);
 static uint32_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample);
@@ -60,7 +62,7 @@ bool APPSCAN_Start(uint8_t cycles_total,
     s_scan.dac_max_raw = g_hw->hvdac->max_raw;
     s_scan.direction = 1;
     s_scan.r_min_q15 = 0xFFFFFFFFUL;
-    s_scan.result.cycles_total = cycles_total;
+    s_scan_rt.cycles_total = cycles_total;
 
     APPRTLOOP_WriteRaw(0U);
 
@@ -88,12 +90,12 @@ bool APPSCAN_IsActive(void)
 
 bool APPSCAN_IsDone(void)
 {
-    return s_scan.done;
+    return s_scan_rt.valid;
 }
 
 const AppScanResult_t *APPSCAN_GetResult(void)
 {
-    return &s_scan.result;
+    return &s_scan_rt;
 }
 
 void APPSCAN_OnSample(const AppRtloopSample_t *sample)
@@ -135,39 +137,15 @@ void APPSCAN_OnSample(const AppRtloopSample_t *sample)
         s_scan.direction = 1;
         s_scan.edge_count++;
         s_scan.cycles_done = (uint8_t)(s_scan.edge_count / 2U);
-        s_scan.result.cycles_done = s_scan.cycles_done;
+        s_scan_rt.cycles_done = s_scan.cycles_done;
         APPSCAN_Finish();
     }
 }
 
 static void APPSCAN_ClearState(void)
 {
-    uint8_t i;
-
-    s_scan.active = false;
-    s_scan.done = false;
-    s_scan.cycles_done = 0U;
-    s_scan.cycles_total = 0U;
-    s_scan.edge_count = 0U;
-    s_scan.dac_raw = 0U;
-    s_scan.dac_max_raw = 0U;
-    s_scan.direction = 1;
-    s_scan.median_count = 0U;
-    s_scan.median_index = 0U;
-    s_scan.r_max_q15 = 0U;
-    s_scan.r_min_q15 = 0U;
-
-    for (i = 0U; i < APPSCAN_MEDIAN_WINDOW; ++i) {
-        s_scan.median_buf[i] = 0UL;
-    }
-
-    s_scan.result.cycles_done = 0U;
-    s_scan.result.cycles_total = 0U;
-    s_scan.result.contrast_q15 = 0U;
-    s_scan.result.r_max_q15 = 0U;
-    s_scan.result.r_min_q15 = 0U;
-    s_scan.result.r_target_q15 = 0U;
-    s_scan.result.valid = false;
+    (void)memset(&s_scan, 0, sizeof(s_scan));
+    (void)memset(&s_scan_rt, 0, sizeof(s_scan_rt));
 }
 
 static uint32_t APPSCAN_ComputeRatioQ15(const AppRtloopSample_t *sample)
@@ -250,7 +228,7 @@ static void APPSCAN_AdvanceWaveform(void)
             s_scan.direction = -1;
             s_scan.edge_count++;
             s_scan.cycles_done = (uint8_t)(s_scan.edge_count / 2U);
-            s_scan.result.cycles_done = s_scan.cycles_done;
+            s_scan_rt.cycles_done = s_scan.cycles_done;
 
             if (s_scan.dac_raw > 0U) {
                 s_scan.dac_raw--;
@@ -263,7 +241,7 @@ static void APPSCAN_AdvanceWaveform(void)
             s_scan.direction = 1;
             s_scan.edge_count++;
             s_scan.cycles_done = (uint8_t)(s_scan.edge_count / 2U);
-            s_scan.result.cycles_done = s_scan.cycles_done;
+            s_scan_rt.cycles_done = s_scan.cycles_done;
 
             if (s_scan.cycles_done >= s_scan.cycles_total) {
                 APPSCAN_Finish();
@@ -291,15 +269,14 @@ static void APPSCAN_Finish(void)
     contrast_den = r_sum;
     contrast_num = (uint32_t)s_scan.r_max_q15 - (uint32_t)s_scan.r_min_q15;
 
-    s_scan.result.cycles_done = s_scan.cycles_done;
-    s_scan.result.cycles_total = s_scan.cycles_total;
-    s_scan.result.contrast_q15 = (uint16_t)(((uint64_t)contrast_num << 15) / contrast_den);
-    s_scan.result.r_max_q15 = s_scan.r_max_q15;
-    s_scan.result.r_min_q15 = s_scan.r_min_q15;
-    s_scan.result.r_target_q15 = (uint32_t)(r_sum / 2U);
-    s_scan.result.valid = true;
+    s_scan_rt.cycles_done = s_scan.cycles_done;
+    s_scan_rt.cycles_total = s_scan.cycles_total;
+    s_scan_rt.contrast_q15 = (uint16_t)(((uint64_t)contrast_num << 15) / contrast_den);
+    s_scan_rt.r_max_q15 = s_scan.r_max_q15;
+    s_scan_rt.r_min_q15 = s_scan.r_min_q15;
+    s_scan_rt.r_target_q15 = (uint32_t)(r_sum / 2U);
+    s_scan_rt.valid = true;
 
-    s_scan.done = true;
     s_scan.active = false;
 
     APPRTLOOP_Stop();

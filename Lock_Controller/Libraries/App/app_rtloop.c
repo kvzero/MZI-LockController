@@ -6,7 +6,6 @@
 
 typedef struct {
     volatile AppRtloopMode_t mode;
-    volatile bool            active;
     volatile bool            error;
 
     uint32_t dma_cdr_word;
@@ -16,6 +15,7 @@ typedef struct {
     uint16_t last_dac_raw;
 } AppRtloopState_t;
 
+/* Private shared sample-loop state owned by the realtime backend. */
 static AppRtloopState_t s_rtloop;
 
 static bool APPRTLOOP_Start(AppRtloopMode_t mode,
@@ -29,7 +29,6 @@ static void APPRTLOOP_OnError(void *user_ctx);
 void APPRTLOOP_Init(void)
 {
     s_rtloop.mode = APP_RTLOOP_MODE_IDLE;
-    s_rtloop.active = false;
     s_rtloop.error = false;
     s_rtloop.dma_cdr_word = 0U;
     s_rtloop.iout_offset_raw = 0U;
@@ -49,17 +48,18 @@ bool APPRTLOOP_StartLock(uint16_t iout_offset_raw, uint16_t iref_offset_raw)
 
 void APPRTLOOP_Stop(void)
 {
-    if (s_rtloop.active && (g_hw != NULL) && (g_hw->hpdadc != NULL)) {
+    if ((s_rtloop.mode != APP_RTLOOP_MODE_IDLE) &&
+        (g_hw != NULL) &&
+        (g_hw->hpdadc != NULL)) {
         PDADC_StopContinuous(g_hw->hpdadc);
     }
 
-    s_rtloop.active = false;
     s_rtloop.mode = APP_RTLOOP_MODE_IDLE;
 }
 
 bool APPRTLOOP_IsActive(void)
 {
-    return (bool)s_rtloop.active;
+    return s_rtloop.mode != APP_RTLOOP_MODE_IDLE;
 }
 
 bool APPRTLOOP_HasError(void)
@@ -92,14 +92,13 @@ static bool APPRTLOOP_Start(AppRtloopMode_t mode,
                             uint16_t iref_offset_raw)
 {
     if ((mode == APP_RTLOOP_MODE_IDLE) ||
-        s_rtloop.active ||
+        (s_rtloop.mode != APP_RTLOOP_MODE_IDLE) ||
         (g_hw == NULL) ||
         (g_hw->hpdadc == NULL)) {
         return false;
     }
 
     s_rtloop.mode = mode;
-    s_rtloop.active = true;
     s_rtloop.error = false;
     s_rtloop.dma_cdr_word = 0U;
     s_rtloop.iout_offset_raw = iout_offset_raw;
@@ -112,7 +111,6 @@ static bool APPRTLOOP_Start(AppRtloopMode_t mode,
                                APPRTLOOP_OnError,
                                NULL)) {
         s_rtloop.mode = APP_RTLOOP_MODE_IDLE;
-        s_rtloop.active = false;
         return false;
     }
 
@@ -129,7 +127,9 @@ static void APPRTLOOP_OnDone(const uint32_t *cdr_buf,
 
     (void)user_ctx;
 
-    if ((cdr_buf == NULL) || (frame_count == 0U) || !s_rtloop.active) {
+    if ((cdr_buf == NULL) ||
+        (frame_count == 0U) ||
+        (s_rtloop.mode == APP_RTLOOP_MODE_IDLE)) {
         return;
     }
 
@@ -170,6 +170,5 @@ static void APPRTLOOP_OnError(void *user_ctx)
     (void)user_ctx;
 
     s_rtloop.error = true;
-    s_rtloop.active = false;
     s_rtloop.mode = APP_RTLOOP_MODE_IDLE;
 }

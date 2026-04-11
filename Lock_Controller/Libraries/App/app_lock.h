@@ -3,8 +3,33 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "app_context.h"
+
 #include "app_rtloop.h"
+#include "app_scan.h"
+
+/**
+ * @brief Public lock backend stages shared across pages and UI code.
+ */
+typedef enum {
+    APP_LOCK_STAGE_IDLE = 0,
+    APP_LOCK_STAGE_CAPTURE,
+    APP_LOCK_STAGE_SOFT,
+    APP_LOCK_STAGE_RESONANCE,
+    APP_LOCK_STAGE_HARD,
+    APP_LOCK_STAGE_FAULT,
+} AppLockStage_t;
+
+/**
+ * @brief Cross-module lock snapshot for UI, page flow, and diagnostics.
+ */
+typedef struct {
+    AppLockStage_t stage;
+    uint32_t r_target_q15;
+    uint32_t r_now_q15;
+    int32_t  error_q15;
+    uint16_t output_raw;
+    uint32_t fn_hz;
+} AppLockRuntime_t;
 
 /**
  * @brief Clear the lock backend and stop the realtime loop if lock owns it.
